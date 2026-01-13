@@ -27,8 +27,8 @@ jobs:
             VERSION="${{ github.ref_name }}"
             # Escape dots in version for regex
             VERSION_ESCAPED=$(echo "$VERSION" | sed 's/\./\\./g')
-            # Use awk to extract content: start at version header, stop at next ## header
-            CHANGES=$(awk "BEGIN{p=0} /^# \[$VERSION_ESCAPED/{p=1;next} /^# \[/{p=0} p" CHANGELOG | sed '/^$/d')
+            # Use awk to extract content: start at version header, stop at next # header
+            CHANGES=$(awk "/^# \[$VERSION_ESCAPED\]/{p=1;next} /^# \[/{p=0} p" CHANGELOG.md)
 
             if [ -z "$CHANGES" ]; then
               echo "CHANGELOG_CONTENT=No changelog entry found for this version." >> $GITHUB_OUTPUT
@@ -39,7 +39,7 @@ jobs:
               echo "EOF" >> $GITHUB_OUTPUT
             fi
           else
-            echo "CHANGELOG_CONTENT=CHANGELOG not found." >> $GITHUB_OUTPUT
+            echo "CHANGELOG_CONTENT=CHANGELOG.md not found." >> $GITHUB_OUTPUT
           fi
 
       - name: Create header archive
