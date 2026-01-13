@@ -7,12 +7,12 @@ if (MSVC)
     endif()
 endif()
 
-project(slick_net
+project(slick-net
     VERSION 1.2.1
     LANGUAGES CXX
 )
 
-message(STATUS "slick_net: ${PROJECT_VERSION}")
+message(STATUS "slick-net: ${PROJECT_VERSION}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,28 +27,31 @@ find_package(OpenSSL REQUIRED)
 
 include(FetchContent)
 
-# Disable tests for slick_queue
+# Disable tests for slick-queue
 set(BUILD_SLICK_QUEUE_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
-    slick_queue
-    GIT_REPOSITORY https://github.com/SlickQuant/slick_queue.git
-    GIT_TAG v1.1.2
+    slick-queue
+    GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
+    GIT_TAG v1.2.2
 )
-FetchContent_MakeAvailable(slick_queue)
+FetchContent_MakeAvailable(slick-queue)
 
-message(STATUS "slick_queue: ${slick_queue_SOURCE_DIR}")
 message(STATUS "OpenSSL: ${OPENSSL_INCLUDE_DIR}")
 message(STATUS "Beast: ${boost_beast_CONFIG}")
 
 # Add header-only library
-add_library(slick_net INTERFACE)
-add_library(slick::slick_net ALIAS slick_net)
-target_include_directories(slick_net INTERFACE 
+add_library(slick-net INTERFACE)
+add_library(slick::net ALIAS slick-net)
+# For backward compatiblity
+add_library(slick_net ALIAS slick-net)
+add_library(slick::slick_net ALIAS slick-net)
+
+target_include_directories(slick-net INTERFACE 
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(slick_net INTERFACE slick::slick_queue Boost::asio Boost::beast Boost::context OpenSSL::SSL OpenSSL::Crypto)
-target_precompile_headers(slick_net INTERFACE
+target_link_libraries(slick-net INTERFACE slick::queue Boost::asio Boost::beast Boost::context OpenSSL::SSL OpenSSL::Crypto)
+target_precompile_headers(slick-net INTERFACE
     # Standard library headers
     <atomic>
     <cstdlib>
@@ -75,15 +78,16 @@ target_precompile_headers(slick_net INTERFACE
     # External dependencies
     <slick/queue.h>
 )
+set_target_properties(slick-net PROPERTIES EXPORT_NAME net)
 
 if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "-O2")
     add_definitions(-D_WIN32_WINNT=0x0A00)
     set(CMAKE_SUPPRESS_REGENERATION true)   # supress zero_check
-    set_target_properties(slick_net PROPERTIES LINK_INCREMENTAL ON)
-    target_compile_options(slick_net INTERFACE "/bigobj")
+    set_target_properties(slick-net PROPERTIES LINK_INCREMENTAL ON)
+    target_compile_options(slick-net INTERFACE "/bigobj")
     if (LINK_STATICALLY)
-        set_target_properties(slick_net PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        set_target_properties(slick-net PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 else()
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
@@ -115,71 +119,52 @@ endif()
 
 option(BUILD_SLICK_NET_TESTS "Build tests" ON)
 if (BUILD_SLICK_NET_TESTS)
-    message(STATUS "Building slick_net tests")
+    message(STATUS "Building slick-net tests")
+    enable_testing()
     add_subdirectory(tests)
 else()
-    message(STATUS "Skipping slick_net tests")
+    message(STATUS "Skipping slick-net tests")
 endif()
 
 option(BUILD_SLICK_NET_EXAMPLES "Build examples" ON)
 if(BUILD_SLICK_NET_EXAMPLES)
-    message(STATUS "Building slick_net examples")
+    message(STATUS "Building slick::net examples")
     add_subdirectory(examples)
 else()
-    message(STATUS "Skipping slick_net examples")
+    message(STATUS "Skipping slick::net examples")
 endif()
 
 # Installation rules
 install(DIRECTORY include/ DESTINATION include)
 
 # Install targets and create CMake config files
-install(TARGETS slick_net
-    EXPORT slick_net-targets
+install(TARGETS slick-net
+    EXPORT slick-net-targets
     INCLUDES DESTINATION include
 )
 
-install(EXPORT slick_net-targets
-    FILE slick_net-targets.cmake
+install(EXPORT slick-net-targets
+    FILE slick-net-targets.cmake
     NAMESPACE slick::
-    DESTINATION share/slick_net
+    DESTINATION share/slick-net
 )
 
 # Create config file
 include(CMakePackageConfigHelpers)
 configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/slick_net-config.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/slick_net-config.cmake"
-    INSTALL_DESTINATION share/slick_net
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/slick-net-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/slick-net-config.cmake"
+    INSTALL_DESTINATION share/slick-net
 )
 
 write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/slick_net-config-version.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/slick-net-config-version.cmake"
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY SameMajorVersion
 )
 
 install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/slick_net-config.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/slick_net-config-version.cmake"
-    DESTINATION share/slick_net
+    "${CMAKE_CURRENT_BINARY_DIR}/slick-net-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/slick-net-config-version.cmake"
+    DESTINATION share/slick-net
 )
-
-# Automatically run install after build in Release mode
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    add_custom_target(dist_slick_net ALL
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/dist/include
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Copying slick_net headers to dist/include"
-        VERBATIM
-    )
-
-    if (PROJECT_IS_TOP_LEVEL)
-        add_custom_target(package_slick_net ALL
-            COMMAND ${CMAKE_COMMAND} -E tar "cfv" "${CMAKE_BINARY_DIR}/dist/slick_net_${PROJECT_VERSION}.zip" --format=zip "include"
-            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/dist"
-            COMMENT "Creating zip archive"
-        )
-
-        add_dependencies(package_slick_net dist_slick_net)
-    endif()
-endif()

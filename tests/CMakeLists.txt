@@ -17,15 +17,13 @@ else()
     FetchContent_MakeAvailable(googletest)
 endif()
 
-enable_testing()
-
 include(GoogleTest)
 
 add_executable(websocket_tests websocket_tests.cpp)
-target_link_libraries(websocket_tests PRIVATE slick_net GTest::gtest_main)
+target_link_libraries(websocket_tests PRIVATE slick::net GTest::gtest_main)
 
 add_executable(http_tests http_tests.cpp)
-target_link_libraries(http_tests PRIVATE slick_net GTest::gtest_main)
+target_link_libraries(http_tests PRIVATE slick::net GTest::gtest_main)
 
 # Discover tests with increased timeout
 gtest_discover_tests(websocket_tests DISCOVERY_TIMEOUT 30)

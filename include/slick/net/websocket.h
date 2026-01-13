@@ -1,5 +1,5 @@
 // The MIT License (MIT)
-// Copyright (c) 2025 SlickQuant
+// Copyright (c) 2025-2026 SlickQuant
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -635,6 +635,7 @@ inline void Websocket::shutdown()
 {
     if (run_.load(std::memory_order_relaxed))
     {
+        LOG_DEBUG("Shutting down WebSocket service thread.");
         run_.store(false, std::memory_order_release);
         ioc_.stop();
         if (service_thread_.joinable())

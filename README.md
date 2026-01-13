@@ -1,9 +1,9 @@
-# slick_net
+# slick-net
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/SlickQuant/slick_net/actions/workflows/ci.yml/badge.svg)](https://github.com/SlickQuant/slick_net/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/SlickQuant/slick_net)](https://github.com/SlickQuant/slick_net/releases)
+[![CI](https://github.com/SlickQuant/slick-net/actions/workflows/ci.yml/badge.svg)](https://github.com/SlickQuant/slick-net/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/SlickQuant/slick-net)](https://github.com/SlickQuant/slick-net/releases)
 
 A high-performance C++ HTTP/WebSocket client library built on Boost.Beast with full SSL/TLS support. Designed for asynchronous, non-blocking HTTP/WebSocket communication in modern C++ applications.
 
@@ -33,11 +33,11 @@ A high-performance C++ HTTP/WebSocket client library built on Boost.Beast with f
 
 ### CMake Integration
 
-Add slick_net as a subdirectory in your CMake project:
+Add slick-net as a subdirectory in your CMake project:
 
 ```cmake
-add_subdirectory(path/to/slick_net)
-target_link_libraries(your_target PRIVATE slick_net)
+add_subdirectory(path/to/slick-net)
+target_link_libraries(your_target PRIVATE slick::net)
 ```
 
 Or use FetchContent:
@@ -45,12 +45,12 @@ Or use FetchContent:
 ```cmake
 include(FetchContent)
 FetchContent_Declare(
-    slick_net
-    GIT_REPOSITORY https://github.com/SlickQuant/slick_net.git
+    slick-net
+    GIT_REPOSITORY https://github.com/SlickQuant/slick-net.git
     GIT_TAG main
 )
-FetchContent_MakeAvailable(slick_net)
-target_link_libraries(your_target PRIVATE slick_net)
+FetchContent_MakeAvailable(slick-net)
+target_link_libraries(your_target PRIVATE slick::net)
 ```
 
 ## Usage

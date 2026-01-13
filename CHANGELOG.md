@@ -1,4 +1,13 @@
-# [1.2.1] - 2025-01-25
+# [v1.2.2] - 2026-01-12
+- Upgraded to slick-queue v1.2.2
+- Renamed repository from slick_net to slick-net (hyphenated naming follows recommended convention)
+- Changed export name from slick_net, slick::slick_net to slick::net
+- Refactored repository name in CMake configuration files
+- Updated documentation and build references to use new repository name
+- Added release GitHub Workflow
+- Updated license copyright years
+
+# [v1.2.1] - 2025-01-25
 
 ## New Features
 - **vcpkg Package Manager Support**: Full integration with vcpkg for easy installation and dependency management
@@ -28,7 +37,7 @@
 - Updated GitHub Actions CI to use GCC 14 on Linux for full C++20 coroutine support
 - Removed GCC 13 compatibility workarounds for awaitable HTTP tests
 
-# [1.2.0] - 2025-01-18
+# [v1.2.0] - 2025-01-18
 
 ## New Features
 - **C++20 Coroutine Awaitable HTTP API**: Added modern async/await interface for all HTTP methods
@@ -42,27 +51,27 @@
   - Supports both HTTP and HTTPS protocols
   - **Note**: GCC 13 has a known compiler bug with coroutine lambdas. Awaitable tests are disabled on GCC 13. Use GCC 14+ or Clang for full awaitable support.
 
-# [1.1.2] - 2025-11-13
+# [v1.1.2] - 2025-11-13
 - Remove unnecessary slick_logger from slick_net link dependencies
 - Update CMakeLists to link slick_logger with example executables
 
-# [1.1.1] - 2025-10-22
+# [v1.1.1] - 2025-10-22
 - Fix slick_queue header include
 - Fix GitHub CI builds
 - Change Version to 3 digits
 
-# [1.1.0.1] - 2025-10-21
+# [v1.1.0.1] - 2025-10-21
 
 - Update slick_queue to v1.1.0.2
 - Change namespace from slick_net to slick::net
 - Change include folder structure from include/slick_net to include/slick/net
 
-# [1.1.0.0] - 2025-10-19
+# [v1.1.0.0] - 2025-10-19
 
 - Added plain WebSocket (ws://) and plain Http (http://) protocol support
 - Added Comprehensive test coverage for plain HTTP (non-SSL) client
 
-## [1.0.0] - 2025-10-11
+## [v1.0.0] - 2025-10-11
 
 - Initial release of slick_net
 - HTTP/HTTPS client with full SSL/TLS support
