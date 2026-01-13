@@ -6,6 +6,7 @@
 - Updated documentation and build references to use new repository name
 - Added release GitHub Workflow
 - Updated license copyright years
+- Improved Websocket unittest
 
 # [v1.2.1] - 2025-01-25
 

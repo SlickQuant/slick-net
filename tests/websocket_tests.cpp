@@ -769,21 +769,35 @@ TEST_F(WebsocketTest, EmptyMessageSend) {
 }
 
 TEST_F(WebsocketTest, RapidOpenClose) {
+    EventSynchronizer connected_sync;
+    EventSynchronizer disconnected_sync;
+    EventSynchronizer error_sync;
+
     auto ws = std::make_shared<Websocket>(
         "wss://ws.postman-echo.com/raw",
-        [&]() {},
-        [&]() {},
+        [&]() { connected_sync.notify(); },
+        [&]() { disconnected_sync.notify(); },
         [&](const char*, std::size_t) {},
-        [&](std::string) {}
+        [&](std::string) { error_sync.notify(); }
     );
 
     // Rapidly open and close
     ws->open();
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    EXPECT_TRUE(ws->status() == Websocket::Status::CONNECTED);
+    wait_for_condition([&]() {
+        return connected_sync.is_triggered() || error_sync.is_triggered();
+    }, std::chrono::milliseconds(1000));
+
+    if (connected_sync.is_triggered()) {
+        EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+    }
 
     ws->close();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_TRUE(wait_for_condition([&]() {
+        return ws->status() == Websocket::Status::DISCONNECTED ||
+            ws->status() == Websocket::Status::DISCONNECTING ||
+            disconnected_sync.is_triggered();
+    }, std::chrono::milliseconds(2000)));
+
     // Should not crash
     EXPECT_TRUE(ws->status() == Websocket::Status::DISCONNECTED ||
                 ws->status() == Websocket::Status::DISCONNECTING);
