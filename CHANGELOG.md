@@ -1,4 +1,4 @@
-# [v1.2.2] - 2026-01-12
+# [v1.2.2] - 2026-01-13
 - Upgraded to slick-queue v1.2.2
 - Renamed repository from slick_net to slick-net (hyphenated naming follows recommended convention)
 - Changed export name from slick_net, slick::slick_net to slick::net
