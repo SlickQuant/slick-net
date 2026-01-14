@@ -1,3 +1,8 @@
+# [unreleased] 
+
+## Changed
+- Updated slick-net-config.cmake.in file to remove cmake config warning.
+
 # [v1.2.2] - 2026-01-13
 - Upgraded to slick-queue v1.2.2
 - Renamed repository from slick_net to slick-net (hyphenated naming follows recommended convention)

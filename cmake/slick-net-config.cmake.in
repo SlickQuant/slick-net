@@ -3,13 +3,14 @@
 include(CMakeFindDependencyMacro)
 
 # Find required dependencies
-find_dependency(Boost REQUIRED COMPONENTS beast context)
-find_dependency(OpenSSL REQUIRED)
+find_dependency(Boost CONFIG REQUIRED COMPONENTS beast context)
+find_dependency(OpenSSL CONFIG REQUIRED)
 
-# slick-queue is fetched automatically, but vcpkg users might have it installed
-find_package(slick-queue QUIET)
+find_package(slick-queue 1.2.2 CONFIG QUIET)
 if(NOT slick-queue_FOUND)
+    message(STATUS "Fetching slick-queue...")
     include(FetchContent)
+    # Disable slick-queue tests
     set(BUILD_SLICK_QUEUE_TESTS OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         slick-queue
