@@ -12,8 +12,6 @@ project(slick-net
     LANGUAGES CXX
 )
 
-message(STATUS "slick-net: ${PROJECT_VERSION}")
-
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -23,18 +21,22 @@ if (LINK_STATICALLY)
     set(OPENSSL_MSVC_STATIC_RT TRUE)
 endif()
 find_package(Boost CONFIG REQUIRED COMPONENTS beast context)
-find_package(OpenSSL REQUIRED)
+find_package(OpenSSL CONFIG REQUIRED)
+find_package(slick-queue 1.2.2 CONFIG QUIET)
 
-include(FetchContent)
+if (NOT slick-queue_FOUND)
+    message(STATUS "Fetching slick-queue...")
 
-# Disable tests for slick-queue
-set(BUILD_SLICK_QUEUE_TESTS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    slick-queue
-    GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
-    GIT_TAG v1.2.2
-)
-FetchContent_MakeAvailable(slick-queue)
+    include(FetchContent)
+    # Disable tests for slick-queue
+    set(BUILD_SLICK_QUEUE_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        slick-queue
+        GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
+        GIT_TAG v1.2.2
+    )
+    FetchContent_MakeAvailable(slick-queue)
+endif()
 
 message(STATUS "OpenSSL: ${OPENSSL_INCLUDE_DIR}")
 message(STATUS "Beast: ${boost_beast_CONFIG}")
@@ -168,3 +170,5 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/slick-net-config-version.cmake"
     DESTINATION share/slick-net
 )
+
+message(STATUS "slick-net: ${PROJECT_VERSION}")
