@@ -1,4 +1,4 @@
-# [unreleased] 
+# [v1.2.3] - 2026-01-29 
 
 ## Fixed
 - WebSocket open now rejects DISCONNECTING state to avoid overlapping reconnect/close races.
