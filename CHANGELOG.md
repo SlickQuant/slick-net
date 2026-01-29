@@ -1,5 +1,10 @@
 # [unreleased] 
 
+## Fixed
+- WebSocket handshake no longer mutates the stored host with an appended port, preventing host corruption on reconnect.
+- WebSocket write errors are now surfaced while connected instead of being ignored.
+- Async HTTP request accounting now decrements even when the coroutine fails, allowing the service thread to stop.
+
 ## Changed
 - Updated slick-net-config.cmake.in file to remove cmake config warning.
 

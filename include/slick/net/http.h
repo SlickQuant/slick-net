@@ -164,6 +164,7 @@ private:
 private:
     static ssl::context init();
     static void ensure_service_thread();
+    static void async_request_done();
 
 private:
     friend class session;
@@ -692,13 +693,6 @@ inline void Http::async_get(std::function<void(Response&&)> on_response, std::st
         do_session(std::string(url), http::verb::get,
             [on_response = std::move(on_response)](Response&& response) mutable {
                 on_response(std::move(response));
-                auto svc_info = async_service_.load(std::memory_order_relaxed);
-                service_info update;
-                do {
-                    assert(svc_info.async_requests_ > 0);
-                    update = svc_info;
-                    --update.async_requests_;
-                } while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
             },
             std::move(headers)),
         [](std::exception_ptr e) {
@@ -709,6 +703,7 @@ inline void Http::async_get(std::function<void(Response&&)> on_response, std::st
                     LOG_ERROR("Http async_get error: {}", e.what());
                 }
             }
+            Http::async_request_done();
     });
 }
 
@@ -720,13 +715,6 @@ inline void Http::async_post(std::function<void(Response&&)> on_response, std::s
         do_session(std::string(url), http::verb::post,
             [on_response = std::move(on_response)](Response&& response) mutable {
                 on_response(std::move(response));
-                auto svc_info = async_service_.load(std::memory_order_relaxed);
-                service_info update;
-                do {
-                    assert(svc_info.async_requests_ > 0);
-                    update = svc_info;
-                    --update.async_requests_;
-                } while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
             },
             std::move(headers), std::string(data)),
         [](std::exception_ptr e) {
@@ -737,6 +725,7 @@ inline void Http::async_post(std::function<void(Response&&)> on_response, std::s
                     LOG_ERROR("Http async_post error: {}", e.what());
                 }
             }
+            Http::async_request_done();
     });
 }
 
@@ -748,13 +737,6 @@ inline void Http::async_put(std::function<void(Response&&)> on_response, std::st
         do_session(std::string(url), http::verb::put,
             [on_response = std::move(on_response)](Response&& response) mutable {
                 on_response(std::move(response));
-                auto svc_info = async_service_.load(std::memory_order_relaxed);
-                service_info update;
-                do {
-                    assert(svc_info.async_requests_ > 0);
-                    update = svc_info;
-                    --update.async_requests_;
-                } while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
             },
             std::move(headers), std::string(data)),
         [](std::exception_ptr e) {
@@ -765,6 +747,7 @@ inline void Http::async_put(std::function<void(Response&&)> on_response, std::st
                     LOG_ERROR("Http async_put error: {}", e.what());
                 }
             }
+            Http::async_request_done();
     });
 }
 
@@ -776,13 +759,6 @@ inline void Http::async_patch(std::function<void(Response&&)> on_response, std::
         do_session(std::string(url), http::verb::patch,
             [on_response = std::move(on_response)](Response&& response) mutable {
                 on_response(std::move(response));
-                auto svc_info = async_service_.load(std::memory_order_relaxed);
-                service_info update;
-                do {
-                    assert(svc_info.async_requests_ > 0);
-                    update = svc_info;
-                    --update.async_requests_;
-                } while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
             },
             std::move(headers), std::string(data)),
         [](std::exception_ptr e) {
@@ -793,6 +769,7 @@ inline void Http::async_patch(std::function<void(Response&&)> on_response, std::
                     LOG_ERROR("Http async_patch error: {}", e.what());
                 }
             }
+            Http::async_request_done();
     });
 }
 
@@ -804,13 +781,6 @@ inline void Http::async_del(std::function<void(Response&&)> on_response, std::st
         do_session(std::string(url), http::verb::delete_,
             [on_response = std::move(on_response)](Response&& response) mutable {
                 on_response(std::move(response));
-                auto svc_info = async_service_.load(std::memory_order_relaxed);
-                service_info update;
-                do {
-                    assert(svc_info.async_requests_ > 0);
-                    update = svc_info;
-                    --update.async_requests_;
-                } while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
             },
             std::move(headers), std::string(data)),
         [](std::exception_ptr e) {
@@ -821,6 +791,7 @@ inline void Http::async_del(std::function<void(Response&&)> on_response, std::st
                     LOG_ERROR("Http async_del error: {}", e.what());
                 }
             }
+            Http::async_request_done();
     });
 }
 
@@ -847,6 +818,16 @@ inline asio::awaitable<Http::Response> Http::async_patch(std::string_view url, s
 inline asio::awaitable<Http::Response> Http::async_del(std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers)
 {
     return do_session_awaitable(std::string(url), http::verb::delete_, std::move(headers), std::string(data), 11);
+}
+
+inline void Http::async_request_done() {
+    auto svc_info = async_service_.load(std::memory_order_relaxed);
+    service_info update;
+    do {
+        assert(svc_info.async_requests_ > 0);
+        update = svc_info;
+        --update.async_requests_;
+    } while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
 }
 
 inline void Http::ensure_service_thread() {

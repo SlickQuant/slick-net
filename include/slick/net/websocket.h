@@ -370,10 +370,9 @@ inline asio::awaitable<void> Websocket::do_ws_session_ssl() {
         // Make the connection on the IP address we get from DNS
         auto ep = co_await asio::async_connect(wss_->next_layer().lowest_layer(), result, asio::use_awaitable);
 
-        // Update the host string. This will provide the value of the
-        // Host HTTP header during the WebSocket handshake.
-        // See https://tools.ietf.org/html/rfc7230#section-5.4
-        host_ += ':' + std::to_string(ep.port());
+        // Build the host header value with port for the WebSocket handshake.
+        // Keep host_ unchanged so reconnects don't double-append ports.
+        const auto host_header = host_ + ':' + std::to_string(ep.port());
 
         // Set a timeout on the operation
         beast::get_lowest_layer(*wss_).expires_after(std::chrono::seconds(30));
@@ -400,7 +399,7 @@ inline asio::awaitable<void> Websocket::do_ws_session_ssl() {
             }));
 
         // Perform the WebSocket handshake
-        co_await wss_->async_handshake(host_, path_, asio::use_awaitable);
+        co_await wss_->async_handshake(host_header, path_, asio::use_awaitable);
 
         if (status_.load(std::memory_order_relaxed) != Status::CONNECTING ||
             !run_.load(std::memory_order_relaxed)) [[unlikely]] {
@@ -447,10 +446,9 @@ inline asio::awaitable<void> Websocket::do_ws_session_plain() {
         // Make the connection on the IP address we get from DNS
         auto ep = co_await beast::get_lowest_layer(*ws_).async_connect(result);
 
-        // Update the host string. This will provide the value of the
-        // Host HTTP header during the WebSocket handshake.
-        // See https://tools.ietf.org/html/rfc7230#section-5.4
-        host_ += ':' + std::to_string(ep.port());
+        // Build the host header value with port for the WebSocket handshake.
+        // Keep host_ unchanged so reconnects don't double-append ports.
+        const auto host_header = host_ + ':' + std::to_string(ep.port());
 
         // Turn off the timeout on the tcp_stream, because
         // the websocket stream has its own timeout system.
@@ -471,7 +469,7 @@ inline asio::awaitable<void> Websocket::do_ws_session_plain() {
             }));
 
         // Perform the WebSocket handshake
-        co_await ws_->async_handshake(host_, path_, asio::use_awaitable);
+        co_await ws_->async_handshake(host_header, path_, asio::use_awaitable);
 
         if (status_.load(std::memory_order_relaxed) != Status::CONNECTING ||
             !run_.load(std::memory_order_relaxed)) [[unlikely]] {
@@ -552,7 +550,7 @@ inline void Websocket::on_write(beast::error_code ec, std::size_t bytes_transfer
     if(ec)
     {
         if (run_.load(std::memory_order_relaxed) &&
-            status_.load(std::memory_order_relaxed) == Status::DISCONNECTED && 
+            status_.load(std::memory_order_relaxed) == Status::CONNECTED && 
             ec != beast::websocket::error::closed && ec != asio::error::eof &&
             ec != asio::error::operation_aborted &&
             !(ec.value() == 995 && ec.category() == boost::system::system_category()))
