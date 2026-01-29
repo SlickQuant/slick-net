@@ -92,7 +92,7 @@ public:
     // Start the asynchronous operation
     void open();
 
-    void close();
+    bool close();
 
     void send(const char* buffer, size_t len, bool is_binary = false);
     void send_binary_data(const char* buffer, size_t len);
@@ -237,8 +237,20 @@ extern "C" inline void __signal_handler(int signal) {
 
 inline void Websocket::open()
 {
+    Status expected = Status::DISCONNECTED;
+    if (!status_.compare_exchange_strong(expected, Status::CONNECTING, std::memory_order_acq_rel)) {
+        if (expected == Status::CONNECTED) {
+            LOG_DEBUG("open: WebSocket {} already connected", url_);
+        }
+        else if (expected == Status::CONNECTING) {
+            LOG_DEBUG("open: WebSocket {} is connecting", url_);
+        }
+        else {
+            LOG_DEBUG("open: WebSocket {} is disconnecting", url_);
+        }
+        return;
+    }
     LOG_INFO("Opening WebSocket {}", url_);
-    status_.store(Status::CONNECTING, std::memory_order_release);
     asio::co_spawn(Websocket::ioc_, do_ws_session(),
         [self = shared_from_this()](std::exception_ptr eptr) {
             if (eptr) {
@@ -287,7 +299,7 @@ inline void Websocket::open()
     }
 }
 
-inline void Websocket::close()
+inline bool Websocket::close()
 {
     if (status_.load(std::memory_order_relaxed) < Status::DISCONNECTING)
     {
@@ -307,7 +319,9 @@ inline void Websocket::close()
                     &Websocket::on_close,
                     shared_from_this()));
         }
+        return true;
     }
+    return false;
 }
 
 inline void Websocket::send(const char* buffer, size_t len, bool is_binary)
@@ -352,6 +366,10 @@ inline asio::awaitable<void> Websocket::do_ws_session_ssl() {
     // SSL WebSocket (wss://)
     try
     {
+        if (status_.load(std::memory_order_relaxed) != Status::CONNECTING) {
+            LOG_DEBUG("Abort connect. WebSocket {} is not CONNECTING", url_);
+            co_return;
+        }
         tcp::resolver resolver(asio::make_strand(Websocket::ioc_));
 
         // Look up the domain name
@@ -435,6 +453,10 @@ inline asio::awaitable<void> Websocket::do_ws_session_plain() {
     // Plain WebSocket (ws://)
     try
     {
+        if (status_.load(std::memory_order_relaxed) != Status::CONNECTING) {
+            LOG_DEBUG("Abort connect. WebSocket {} is not CONNECTING", url_);
+            co_return;
+        }
         tcp::resolver resolver(asio::make_strand(Websocket::ioc_));
 
         // Look up the domain name
