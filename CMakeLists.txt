@@ -33,9 +33,11 @@ if (NOT slick-queue_FOUND)
     FetchContent_Declare(
         slick-queue
         GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
-        GIT_TAG v1.2.2
+        GIT_TAG v1.2.3
     )
     FetchContent_MakeAvailable(slick-queue)
+else()
+    message(STATUS "slick-queue: ${slick-queue_VERSION}")
 endif()
 
 message(STATUS "OpenSSL: ${OPENSSL_INCLUDE_DIR}")
@@ -171,4 +173,4 @@ install(FILES
     DESTINATION share/slick-net
 )
 
-message(STATUS "slick-net: ${PROJECT_VERSION}")
+message(STATUS "${PROJECT_NAME}: ${PROJECT_VERSION}")
