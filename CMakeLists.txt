@@ -8,7 +8,7 @@ if (MSVC)
 endif()
 
 project(slick-net
-    VERSION 1.2.3
+    VERSION 1.2.4
     LANGUAGES CXX
 )
 
@@ -22,8 +22,13 @@ if (LINK_STATICALLY)
 endif()
 find_package(Boost CONFIG REQUIRED COMPONENTS beast context)
 find_package(OpenSSL CONFIG REQUIRED)
-find_package(slick-queue 1.2.2 CONFIG QUIET)
 
+find_package(slick-shm CONFIG QUIET)
+if (slick-shm_FOUND)
+    message(STATUS "slick-shm: ${slick-shm_VERSION}")
+endif()
+
+find_package(slick-queue 1.2.2 CONFIG QUIET)
 if (NOT slick-queue_FOUND)
     message(STATUS "Fetching slick-queue...")
 
@@ -33,7 +38,7 @@ if (NOT slick-queue_FOUND)
     FetchContent_Declare(
         slick-queue
         GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
-        GIT_TAG v1.2.3
+        GIT_TAG v1.2.3 # See https://github.com/SlickQuant/slick-net/releases for latest version
     )
     FetchContent_MakeAvailable(slick-queue)
 else()
@@ -55,33 +60,6 @@ target_include_directories(slick-net INTERFACE
     $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(slick-net INTERFACE slick::queue Boost::asio Boost::beast Boost::context OpenSSL::SSL OpenSSL::Crypto)
-target_precompile_headers(slick-net INTERFACE
-    # Standard library headers
-    <atomic>
-    <cstdlib>
-    <functional>
-    <unordered_map>
-    <mutex>
-    <csignal>
-    <thread>
-    # Boost headers
-    <boost/beast/core.hpp>
-    <boost/beast/websocket.hpp>
-    <boost/beast/websocket/ssl.hpp>
-    <boost/beast/http.hpp>
-    <boost/asio/ssl.hpp>
-    <boost/asio/strand.hpp>
-    <boost/asio/awaitable.hpp>
-    <boost/asio/co_spawn.hpp>
-    <boost/asio/signal_set.hpp>
-    <boost/asio/ip/tcp.hpp>
-    <boost/asio/ssl/stream.hpp>
-    <boost/asio/connect.hpp>
-    <boost/asio/post.hpp>
-    <boost/asio/as_tuple.hpp>
-    # External dependencies
-    <slick/queue.h>
-)
 set_target_properties(slick-net PROPERTIES EXPORT_NAME net)
 
 if (MSVC)

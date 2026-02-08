@@ -573,8 +573,10 @@ inline void Websocket::on_write(beast::error_code ec, std::size_t bytes_transfer
     {
         if (run_.load(std::memory_order_relaxed) &&
             status_.load(std::memory_order_relaxed) == Status::CONNECTED && 
-            ec != beast::websocket::error::closed && ec != asio::error::eof &&
+            ec != beast::websocket::error::closed && 
+            ec != asio::error::eof &&
             ec != asio::error::operation_aborted &&
+            ec != ssl::error::stream_truncated &&
             !(ec.value() == 995 && ec.category() == boost::system::system_category()))
         {
             on_error_(std::format("Failed to write {}", ec.message()));
@@ -595,8 +597,10 @@ inline void Websocket::on_read(beast::error_code ec, std::size_t bytes_transferr
     {
         if (run_.load(std::memory_order_relaxed) &&
             status_.load(std::memory_order_relaxed) == Status::CONNECTED &&
-            ec != beast::websocket::error::closed && ec != asio::error::eof &&
+            ec != beast::websocket::error::closed &&
+            ec != asio::error::eof &&
             ec != asio::error::operation_aborted &&
+            ec != ssl::error::stream_truncated &&
             !(ec.value() == 995 && ec.category() == boost::system::system_category()))
         {
             on_error_(std::format("Failed to read {}", ec.message()));
@@ -604,7 +608,7 @@ inline void Websocket::on_read(beast::error_code ec, std::size_t bytes_transferr
         }
         else if (status_.load(std::memory_order_relaxed) == Status::CONNECTED) {
             // EOF or websocket::error::closed means graceful disconnect
-            status_.store(Status::DISCONNECTED, std::memory_order_relaxed);
+            status_.store(Status::DISCONNECTED, std::memory_order_release);
             on_diconnected_();
         }
         return;
@@ -636,10 +640,11 @@ inline void Websocket::on_read(beast::error_code ec, std::size_t bytes_transferr
 
 inline void Websocket::on_close(beast::error_code ec)
 {
-    if (ec && ec != beast::websocket::error::closed &&
-        run_.load(std::memory_order_relaxed) &&
+    if (ec && run_.load(std::memory_order_relaxed) && 
+        ec != beast::websocket::error::closed &&
         ec != asio::error::eof &&
         ec != asio::error::operation_aborted && 
+        ec != ssl::error::stream_truncated &&
         !(ec.value() == 995 && ec.category() == boost::system::system_category()))
     {
         on_error_(ec.message());

@@ -1,4 +1,19 @@
-# [v1.2.3] - 2026-01-29 
+# [v1.2.4] - 2026-02-08
+
+## Fixed
+- WebSocket error handling now properly ignores SSL stream_truncated errors
+  - Added `ssl::error::stream_truncated` to the list of benign errors in read/write/close handlers
+  - Prevents spurious error callbacks when SSL connections are closed without proper shutdown handshake
+  - Improved code formatting for better readability of error condition checks
+- WebSocket read handler now uses `memory_order_release` when setting DISCONNECTED state for proper memory synchronization
+
+## Changed
+- Removed INTERFACE precompiled headers to improve downstream project build times
+  - Downstream projects are no longer forced to precompile Boost.Beast/Asio and OpenSSL headers
+  - Projects can now opt-in to their own PCH strategy if desired
+  - Library functionality remains unchanged
+
+# [v1.2.3] - 2026-01-29
 
 ## Fixed
 - WebSocket open now rejects DISCONNECTING state to avoid overlapping reconnect/close races.
