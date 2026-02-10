@@ -16,7 +16,7 @@
 // #define LOG_ERROR(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[ERROR] " << std::format(fmt, __VA_ARGS__) << std::endl
 // #define LOG_TRACE(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[TRACE] " << std::format(fmt, __VA_ARGS__) << std::endl
 
-#include <slick/net/websocket.h>
+#include <slick/net/websocket.hpp>
 
 namespace slick::net {
 

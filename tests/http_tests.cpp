@@ -5,13 +5,16 @@
 #include <thread>
 #include <string>
 #include <nlohmann/json.hpp>
+#include <slick/net/http_stream.hpp>
 
 // Define logging macros for debugging if needed
 // #define LOG_DEBUG(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[DEBUG] " << std::format(fmt, __VA_ARGS__) << std::endl
 // #define LOG_INFO(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[INFO] " << std::format(fmt, __VA_ARGS__) << std::endl
 // #define LOG_ERROR(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[ERROR] " << std::format(fmt, __VA_ARGS__) << std::endl
 
-#include <slick/net/http.h>
+#include <slick/net/http.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/co_spawn.hpp>
 
 namespace slick::net {
 
@@ -702,16 +705,16 @@ TEST_F(HttpTest, HttpStream_StatusCheck) {
 #if !defined(__GNUC__) || __GNUC__ >= 14 || defined(__clang__)
 
 TEST_F(HttpTest, AwaitableGet_BasicRequest) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_get("https://jsonplaceholder.typicode.com/posts/1");
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -743,16 +746,16 @@ TEST_F(HttpTest, AwaitableGet_BasicRequest) {
 }
 
 TEST_F(HttpTest, AwaitableGet_PlainHttp) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_get("http://httpbun.com/get");
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -777,11 +780,11 @@ TEST_F(HttpTest, AwaitableGet_PlainHttp) {
 }
 
 TEST_F(HttpTest, AwaitableGet_WithCustomHeaders) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_get(
             "https://jsonplaceholder.typicode.com/posts/1",
             {{"X-Custom-Header", "test-value"}, {"Accept", "application/json"}}
@@ -789,7 +792,7 @@ TEST_F(HttpTest, AwaitableGet_WithCustomHeaders) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -814,16 +817,16 @@ TEST_F(HttpTest, AwaitableGet_WithCustomHeaders) {
 }
 
 TEST_F(HttpTest, AwaitableGet_404NotFound) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_get("https://jsonplaceholder.typicode.com/posts/999999");
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -847,7 +850,7 @@ TEST_F(HttpTest, AwaitableGet_404NotFound) {
 // ======================== Awaitable POST Tests ========================
 
 TEST_F(HttpTest, AwaitablePost_JsonData) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
@@ -857,7 +860,7 @@ TEST_F(HttpTest, AwaitablePost_JsonData) {
         {"userId", 1}
     };
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_post(
             "https://jsonplaceholder.typicode.com/posts",
             post_data.dump(),
@@ -866,7 +869,7 @@ TEST_F(HttpTest, AwaitablePost_JsonData) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -893,7 +896,7 @@ TEST_F(HttpTest, AwaitablePost_JsonData) {
 }
 
 TEST_F(HttpTest, AwaitablePost_PlainHttp) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
@@ -902,7 +905,7 @@ TEST_F(HttpTest, AwaitablePost_PlainHttp) {
         {"value", 42}
     };
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_post(
             "http://httpbun.com/post",
             post_data.dump(),
@@ -911,7 +914,7 @@ TEST_F(HttpTest, AwaitablePost_PlainHttp) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -939,7 +942,7 @@ TEST_F(HttpTest, AwaitablePost_PlainHttp) {
 // ======================== Awaitable PUT Tests ========================
 
 TEST_F(HttpTest, AwaitablePut_UpdateResource) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
@@ -950,7 +953,7 @@ TEST_F(HttpTest, AwaitablePut_UpdateResource) {
         {"userId", 1}
     };
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_put(
             "https://jsonplaceholder.typicode.com/posts/1",
             put_data.dump(),
@@ -959,7 +962,7 @@ TEST_F(HttpTest, AwaitablePut_UpdateResource) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -984,7 +987,7 @@ TEST_F(HttpTest, AwaitablePut_UpdateResource) {
 }
 
 TEST_F(HttpTest, AwaitablePut_PlainHttp) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
@@ -993,7 +996,7 @@ TEST_F(HttpTest, AwaitablePut_PlainHttp) {
         {"timestamp", 1234567890}
     };
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_put(
             "http://httpbun.com/put",
             put_data.dump(),
@@ -1002,7 +1005,7 @@ TEST_F(HttpTest, AwaitablePut_PlainHttp) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -1030,7 +1033,7 @@ TEST_F(HttpTest, AwaitablePut_PlainHttp) {
 // ======================== Awaitable PATCH Tests ========================
 
 TEST_F(HttpTest, AwaitablePatch_PartialUpdate) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
@@ -1038,7 +1041,7 @@ TEST_F(HttpTest, AwaitablePatch_PartialUpdate) {
         {"title", "Awaitable PATCH test"}
     };
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_patch(
             "https://jsonplaceholder.typicode.com/posts/1",
             patch_data.dump(),
@@ -1047,7 +1050,7 @@ TEST_F(HttpTest, AwaitablePatch_PartialUpdate) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -1074,16 +1077,16 @@ TEST_F(HttpTest, AwaitablePatch_PartialUpdate) {
 // ======================== Awaitable DELETE Tests ========================
 
 TEST_F(HttpTest, AwaitableDelete_BasicRequest) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_del("https://jsonplaceholder.typicode.com/posts/1");
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -1105,7 +1108,7 @@ TEST_F(HttpTest, AwaitableDelete_BasicRequest) {
 }
 
 TEST_F(HttpTest, AwaitableDelete_WithBody) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     Http::Response awaitable_response;
     std::atomic<bool> completed{false};
 
@@ -1113,7 +1116,7 @@ TEST_F(HttpTest, AwaitableDelete_WithBody) {
         {"reason", "Testing awaitable delete"}
     };
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         awaitable_response = co_await Http::async_del(
             "https://httpbun.com/delete",
             delete_data.dump(),
@@ -1122,7 +1125,7 @@ TEST_F(HttpTest, AwaitableDelete_WithBody) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -1146,11 +1149,11 @@ TEST_F(HttpTest, AwaitableDelete_WithBody) {
 // ======================== Awaitable Sequential Tests ========================
 
 TEST_F(HttpTest, AwaitableSequential_MultipleRequests) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     std::atomic<int> request_count{0};
     std::atomic<bool> completed{false};
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         // Sequential GET requests
         auto resp1 = co_await Http::async_get("https://jsonplaceholder.typicode.com/posts/1");
         EXPECT_TRUE(resp1.is_ok());
@@ -1167,7 +1170,7 @@ TEST_F(HttpTest, AwaitableSequential_MultipleRequests) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {
@@ -1190,11 +1193,11 @@ TEST_F(HttpTest, AwaitableSequential_MultipleRequests) {
 // ======================== Awaitable Mixed Operations Test ========================
 
 TEST_F(HttpTest, AwaitableMixed_AllHttpMethods) {
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
     std::atomic<int> operations_completed{0};
     std::atomic<bool> completed{false};
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> boost::asio::awaitable<void> {
         // GET
         auto get_resp = co_await Http::async_get("https://jsonplaceholder.typicode.com/posts/1");
         EXPECT_TRUE(get_resp.is_ok());
@@ -1238,7 +1241,7 @@ TEST_F(HttpTest, AwaitableMixed_AllHttpMethods) {
         completed.store(true);
     };
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         test_coro(),
         [](std::exception_ptr e) {

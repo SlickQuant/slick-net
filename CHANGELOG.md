@@ -1,3 +1,26 @@
+# [v2.0.0] - 2026-02-09
+
+## Changed
+- Removed header-only compatibility support completely
+  - Removed `SLICK_NET_HEADER_ONLY` public-header fallback path
+  - Removed deprecated `slick::net_header_only` CMake target
+  - Simplified tests/examples/build wiring to static-library-only mode
+
+# [v1.3.0] - 2026-02-09
+
+## Changed
+- Switched `slick::net` from header-only to static-library default
+  - Added compiled sources under `src/` (`http.cpp`, `websocket.cpp`, `logging.cpp`)
+  - Reduced downstream compile-time pressure by moving heavy Boost/OpenSSL implementation out of public headers
+- Added PIMPL-based slim public headers for `Websocket` and `HttpStream`
+- Added runtime logging hook API in `include/slick/net/logging.h`
+  - `set_log_handler(LogHandler)`
+  - `clear_log_handler()`
+- Added deprecated header-only compatibility target `slick::net_header_only`
+  - Enabled via `SLICK_NET_HEADER_ONLY`
+  - Planned removal in `2.0.0`
+- Added `logging_tests` for runtime logging hook dispatch behavior
+
 # [v1.2.4] - 2026-02-08
 
 ## Fixed

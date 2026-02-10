@@ -25,9 +25,13 @@ target_link_libraries(websocket_tests PRIVATE slick::net GTest::gtest_main)
 add_executable(http_tests http_tests.cpp)
 target_link_libraries(http_tests PRIVATE slick::net GTest::gtest_main)
 
+add_executable(logging_tests logging_tests.cpp)
+target_link_libraries(logging_tests PRIVATE slick::net GTest::gtest_main)
+
 # Discover tests with increased timeout
 gtest_discover_tests(websocket_tests DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(http_tests DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(logging_tests DISCOVERY_TIMEOUT 30)
 
 # Set test properties
 set_target_properties(websocket_tests PROPERTIES
@@ -35,5 +39,9 @@ set_target_properties(websocket_tests PROPERTIES
 )
 
 set_target_properties(http_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+)
+
+set_target_properties(logging_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
 )

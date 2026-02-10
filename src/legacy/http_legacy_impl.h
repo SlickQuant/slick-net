@@ -169,16 +169,7 @@ private:
 private:
     friend class session;
     friend class HttpStream;
-    static asio::io_context ioc_;
-    static asio::io_context async_ioc_;
-
-    struct service_info
-    {
-        uint32_t async_requests_ = 0;
-        bool service_running_ = false;
-    };
-    static std::atomic<service_info> async_service_;
-    static ssl::context ctx_;
+    
 };
 
 // HTTP Stream class for Server-Sent Events (SSE) and chunked response streaming
@@ -1283,16 +1274,7 @@ inline void HttpStream::parse_sse_chunk(const char* data, size_t size)
     }
 }
 
-// A Terminator class to ensure HttpStream::shutdown() is called at program exit
-struct HttpStreamTerminater
-{
-    HttpStreamTerminater() {
-    }
-    ~HttpStreamTerminater() {
-        HttpStream::shutdown();
-    }
-};
+// 
 
-inline static HttpStreamTerminater s_http_stream_terminater;
 
 }   // namespace slick::net

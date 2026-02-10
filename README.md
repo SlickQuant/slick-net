@@ -15,7 +15,7 @@ A high-performance C++ HTTP/WebSocket client library built on Boost.Beast with f
 - **SSL/TLS Support**: Native support for secure `https://` and `wss://` connections
 - **Multiple Async APIs**: Synchronous, callback-based, and C++20 coroutine awaitable interfaces
 - **Cross-Platform**: Works on Windows, Linux, and macOS
-- **Header-Only**: Easy integration with minimal dependencies
+- **Static Library by Default**: Heavy networking implementation compiles once in `slick-net`
 - **Callback-Based API**: Clean event-driven interface for connection lifecycle management
 - **Thread-Safe**: Proper strand management for concurrent operations
 - **Modern C++20**: Leverages coroutines and modern C++ features
@@ -40,6 +40,8 @@ add_subdirectory(path/to/slick-net)
 target_link_libraries(your_target PRIVATE slick::net)
 ```
 
+`slick::net` is the default static-library target.
+
 Or use FetchContent:
 
 ```cmake
@@ -51,6 +53,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(slick-net)
 target_link_libraries(your_target PRIVATE slick::net)
+```
+
+### Runtime Logging Hooks
+
+Internal slick-net logs are routed via runtime hooks:
+
+```cpp
+#include <slick/net/logging.h>
+
+slick::net::set_log_handler([](slick::net::LogLevel level, std::string_view message) {
+    // Route to your logger
+});
+
+// Optional cleanup
+slick::net::clear_log_handler();
 ```
 
 ## Usage
@@ -204,7 +221,7 @@ struct Response {
 
 **Example Usage - Synchronous:**
 ```cpp
-#include <slick/net/http.h>
+#include <slick/net/http.hpp>
 
 // Synchronous GET
 auto response = Http::get("https://api.example.com/data");
@@ -215,7 +232,7 @@ if (response.is_ok()) {
 
 **Example Usage - Asynchronous Callback-Based:**
 ```cpp
-#include <slick/net/http.h>
+#include <slick/net/http.hpp>
 
 // Asynchronous POST with JSON
 nlohmann::json data = {{"key", "value"}};
@@ -228,7 +245,7 @@ Http::async_post([](Http::Response&& rsp) {
 
 **Example Usage - Asynchronous Awaitable (C++20 Coroutines):**
 ```cpp
-#include <slick/net/http.h>
+#include <slick/net/http.hpp>
 #include <boost/asio.hpp>
 
 asio::awaitable<void> fetch_data() {
@@ -317,7 +334,7 @@ HttpStream(
 
 **Example Usage - Server-Sent Events (SSE):**
 ```cpp
-#include <slick/net/http.h>
+#include <slick/net/http.hpp>
 
 auto stream = std::make_shared<HttpStream>(
     "https://api.example.com/events",
@@ -345,7 +362,7 @@ stream->close();
 
 **Example Usage - OpenAI Streaming API:**
 ```cpp
-#include <slick/net/http.h>
+#include <slick/net/http.hpp>
 #include <nlohmann/json.hpp>
 
 auto stream = std::make_shared<HttpStream>(

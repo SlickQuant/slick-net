@@ -1,12 +1,55 @@
-#include <slick/logger.hpp>  // must be included before <slick/net/http.h>
-#include <slick/net/http.h>
+#include <slick/net/http.hpp>
+#include <slick/net/logging.h>
 #include <nlohmann/json.hpp>
+#include <slick/logger.hpp>
+#include <boost/asio.hpp>
+// #include <boost/asio/io_context.hpp>
+// #include <boost/asio/co_spawn.hpp>
 
 using namespace slick::net;
 using namespace slick::logger;
 
+namespace {
+void configure_slick_net_logging()
+{
+    set_log_handler([](slick::net::LogLevel level, const char* format_text,
+                       std::format_args args) {
+        
+        std::string message;
+        try {
+            message = std::vformat(format_text, args);
+        } catch (...) {
+            message = std::string(format_text);
+        }
+
+        switch (level) {
+            case slick::net::LogLevel::Trace:
+                LOG_TRACE(format_text, args);
+                break;
+            case slick::net::LogLevel::Debug:
+                LOG_DEBUG("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Info:
+                LOG_INFO("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Warn:
+                LOG_WARN("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Error:
+                LOG_ERROR(format_text, args);
+                break;
+        }
+    });
+}
+
+void shutdown_slick_net_logging()
+{
+    clear_log_handler();
+}
+}
+
 // Example coroutine that demonstrates awaitable HTTP GET request
-asio::awaitable<void> example_get()
+boost::asio::awaitable<void> example_get()
 {
     LOG_INFO("Starting awaitable GET request...");
 
@@ -29,7 +72,7 @@ asio::awaitable<void> example_get()
 }
 
 // Example coroutine that demonstrates awaitable HTTP GET with custom headers
-asio::awaitable<void> example_get_with_headers()
+boost::asio::awaitable<void> example_get_with_headers()
 {
     LOG_INFO("Starting awaitable GET with custom headers...");
 
@@ -47,7 +90,7 @@ asio::awaitable<void> example_get_with_headers()
 }
 
 // Example coroutine that demonstrates awaitable HTTP POST request
-asio::awaitable<void> example_post()
+boost::asio::awaitable<void> example_post()
 {
     LOG_INFO("Starting awaitable POST request...");
 
@@ -78,7 +121,7 @@ asio::awaitable<void> example_post()
 }
 
 // Example coroutine that demonstrates awaitable HTTP PUT request
-asio::awaitable<void> example_put()
+boost::asio::awaitable<void> example_put()
 {
     LOG_INFO("Starting awaitable PUT request...");
 
@@ -104,7 +147,7 @@ asio::awaitable<void> example_put()
 }
 
 // Example coroutine that demonstrates awaitable HTTP PATCH request
-asio::awaitable<void> example_patch()
+boost::asio::awaitable<void> example_patch()
 {
     LOG_INFO("Starting awaitable PATCH request...");
 
@@ -127,7 +170,7 @@ asio::awaitable<void> example_patch()
 }
 
 // Example coroutine that demonstrates awaitable HTTP DELETE request
-asio::awaitable<void> example_delete()
+boost::asio::awaitable<void> example_delete()
 {
     LOG_INFO("Starting awaitable DELETE request...");
 
@@ -142,7 +185,7 @@ asio::awaitable<void> example_delete()
 }
 
 // Example coroutine that demonstrates multiple sequential awaitable requests
-asio::awaitable<void> example_sequential_requests()
+boost::asio::awaitable<void> example_sequential_requests()
 {
     LOG_INFO("Starting sequential awaitable requests...");
 
@@ -170,33 +213,33 @@ asio::awaitable<void> example_sequential_requests()
     }
 }
 
-#if 0 // Requires asio::experimental features - not available in standard Boost.Asio
+#if 0 // Requires boost::asio::experimental features - not available in standard Boost.Asio
 // Example coroutine that demonstrates parallel awaitable requests
-asio::awaitable<void> example_parallel_requests()
+boost::asio::awaitable<void> example_parallel_requests()
 {
     LOG_INFO("Starting parallel awaitable requests...");
 
-    auto executor = co_await asio::this_coro::executor;
+    auto executor = co_await boost::asio::this_coro::executor;
 
     // Launch multiple requests in parallel
-    auto fut1 = asio::co_spawn(executor,
+    auto fut1 = boost::asio::co_spawn(executor,
         Http::async_get("https://jsonplaceholder.typicode.com/posts/1"),
-        asio::use_awaitable);
+        boost::asio::use_awaitable);
 
-    auto fut2 = asio::co_spawn(executor,
+    auto fut2 = boost::asio::co_spawn(executor,
         Http::async_get("https://jsonplaceholder.typicode.com/posts/2"),
-        asio::use_awaitable);
+        boost::asio::use_awaitable);
 
-    auto fut3 = asio::co_spawn(executor,
+    auto fut3 = boost::asio::co_spawn(executor,
         Http::async_get("https://jsonplaceholder.typicode.com/posts/3"),
-        asio::use_awaitable);
+        boost::asio::use_awaitable);
 
     // Wait for all to complete
-    auto [resp1, resp2, resp3] = co_await asio::experimental::make_parallel_group(
+    auto [resp1, resp2, resp3] = co_await boost::asio::experimental::make_parallel_group(
         std::move(fut1), std::move(fut2), std::move(fut3)
     ).async_wait(
-        asio::experimental::wait_for_all(),
-        asio::use_awaitable
+        boost::asio::experimental::wait_for_all(),
+        boost::asio::use_awaitable
     );
 
     LOG_INFO("Parallel request 1: status {}", std::get<0>(resp1).result_code);
@@ -206,7 +249,7 @@ asio::awaitable<void> example_parallel_requests()
 #endif
 
 // Example coroutine that demonstrates error handling
-asio::awaitable<void> example_error_handling()
+boost::asio::awaitable<void> example_error_handling()
 {
     LOG_INFO("Starting error handling example...");
 
@@ -229,7 +272,7 @@ asio::awaitable<void> example_error_handling()
 }
 
 // Main coordinator coroutine
-asio::awaitable<void> run_all_examples()
+boost::asio::awaitable<void> run_all_examples()
 {
     try {
         co_await example_get();
@@ -256,16 +299,17 @@ int main()
     // Initialize logger
     auto &logger = Logger::instance();
     logger.add_console_sink(true, true);
-    logger.set_level(LogLevel::L_DEBUG);
+    logger.set_level(slick::logger::LogLevel::L_DEBUG);
     logger.init(1024);
+    configure_slick_net_logging();
 
     LOG_INFO("HTTP Awaitable Client Example");
     LOG_INFO("================================");
 
     // Create io_context and run the examples
-    asio::io_context ioc;
+    boost::asio::io_context ioc;
 
-    asio::co_spawn(
+    boost::asio::co_spawn(
         ioc,
         run_all_examples(),
         [](std::exception_ptr e) {
@@ -282,6 +326,7 @@ int main()
     LOG_INFO("Running io_context...");
     ioc.run();
     LOG_INFO("io_context finished");
+    shutdown_slick_net_logging();
 
     return 0;
 }

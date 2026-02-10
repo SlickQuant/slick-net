@@ -1,22 +1,56 @@
-#include <slick/logger.hpp>  // must be included before <slick/net/websocket.h>
-#include <slick/net/websocket.h>
+#include <slick/logger.hpp>
+#include <slick/net/logging.h>
+#include <slick/net/websocket.hpp>
 #include <thread>
 #include <nlohmann/json.hpp>
 using namespace slick::net;
 using namespace slick::logger;
 
-// slick_logger defines LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_TRACE macros
+namespace {
+void configure_slick_net_logging()
+{
+    set_log_handler([](slick::net::LogLevel level, const char* format_text,
+                       std::format_args args) {
+        std::string message;
+        try {
+            message = std::vformat(format_text, args);
+        } catch (...) {
+            message = std::string(format_text);
+        }
 
-// User can assign their own log functions by defining these macros before including <slick/net/websocket.h>
-// The log functions must support fmt-style formatting
-// e.g. LOG_INFO("Hello {}", "world");
+        switch (level) {
+            case slick::net::LogLevel::Trace:
+                LOG_TRACE("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Debug:
+                LOG_DEBUG("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Info:
+                LOG_INFO("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Warn:
+                LOG_WARN("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Error:
+                LOG_ERROR("slick-net: {}", message);
+                break;
+        }
+    });
+}
+
+void shutdown_slick_net_logging()
+{
+    clear_log_handler();
+}
+}
 
 int main()
 {
     auto &logger = Logger::instance();
     logger.add_console_sink(true, true);
-    logger.set_level(LogLevel::L_INFO);
+    logger.set_level(slick::logger::LogLevel::L_INFO);
     logger.init(1024, 16777216); // use pre-added sinks
+    configure_slick_net_logging();
 
     std::vector<nlohmann::json> requests {
         R"({
@@ -54,5 +88,6 @@ int main()
     {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+    shutdown_slick_net_logging();
     return 0;
 }

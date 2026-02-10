@@ -23,4 +23,7 @@ endif()
 # Include the targets file
 include("${CMAKE_CURRENT_LIST_DIR}/slick-net-targets.cmake")
 
+# Exported target:
+# - slick::net (static library)
+
 check_required_components(slick-net)

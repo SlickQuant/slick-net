@@ -1,12 +1,49 @@
-#include <slick/logger.hpp>  // must be included before <slick/net/http.h>
-#include <slick/net/http.h>
+#include <slick/logger.hpp>
+#include <slick/net/http_stream.hpp>
+#include <slick/net/logging.h>
 #include <thread>
 #include <nlohmann/json.hpp>
 
 using namespace slick::net;
 using namespace slick::logger;
 
-// slick_logger defines LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_TRACE macros
+namespace {
+void configure_slick_net_logging()
+{
+    set_log_handler([](slick::net::LogLevel level, const char* format_text,
+                       std::format_args args) {
+        std::string message;
+        try {
+            message = std::vformat(format_text, args);
+        } catch (...) {
+            message = std::string(format_text);
+        }
+
+        switch (level) {
+            case slick::net::LogLevel::Trace:
+                LOG_TRACE("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Debug:
+                LOG_DEBUG("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Info:
+                LOG_INFO("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Warn:
+                LOG_WARN("slick-net: {}", message);
+                break;
+            case slick::net::LogLevel::Error:
+                LOG_ERROR("slick-net: {}", message);
+                break;
+        }
+    });
+}
+
+void shutdown_slick_net_logging()
+{
+    clear_log_handler();
+}
+}
 
 // Example: Connect to a Server-Sent Events (SSE) endpoint
 // This demonstrates HTTP streaming for real-time data
@@ -15,8 +52,9 @@ int main()
 {
     auto &logger = Logger::instance();
     logger.add_console_sink(true, true);
-    logger.set_level(LogLevel::L_INFO);
+    logger.set_level(slick::logger::LogLevel::L_INFO);
     logger.init(1024, 16777216); // use pre-added sinks
+    configure_slick_net_logging();
 
     std::atomic<int> event_count{0};
 
@@ -69,6 +107,7 @@ int main()
 
     // Shutdown the service
     HttpStream::shutdown();
+    shutdown_slick_net_logging();
 
     return 0;
 }
