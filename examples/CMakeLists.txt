@@ -2,7 +2,7 @@ project(websocket_client_example LANGUAGES CXX)
 
 find_package(OpenSSL CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
-find_package(slick-logger 1.0.4 CONFIG QUIET)
+find_package(slick-logger 1.0.6 CONFIG QUIET)
 
 if (NOT slick-logger_FOUND)
     message(STATUS "Fetching slick-logger...")
@@ -14,7 +14,7 @@ if (NOT slick-logger_FOUND)
     FetchContent_Declare(
         slick-logger
         GIT_REPOSITORY https://github.com/SlickQuant/slick-logger.git
-        GIT_TAG v1.0.4
+        GIT_TAG v1.0.6
     )
     FetchContent_MakeAvailable(slick-logger)
 else()
