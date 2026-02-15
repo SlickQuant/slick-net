@@ -1,4 +1,4 @@
-#include <slick/net/logging.h>
+#include <slick/net/logging.hpp>
 
 namespace slick::net {
 namespace {

@@ -1,26 +1,20 @@
 #include <slick/net/http.hpp>
-#include <slick/net/logging.h>
+#include <slick/net/logging.hpp>
+#include "utils.hpp"
 
 #include <memory>
 #include <utility>
 
-// #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/beast/core.hpp>
-// #include <boost/beast/websocket.hpp>
-// #include <boost/beast/websocket/ssl.hpp>
 #include <boost/beast/version.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/asio/ssl.hpp>
-// #include <boost/asio/strand.hpp>
 #include <boost/asio/co_spawn.hpp>
-// #include <boost/asio/signal_set.hpp>
 #include <boost/asio/ip/tcp.hpp>
-// #include <boost/asio/ssl/stream.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/as_tuple.hpp>
-#include "utils.hpp"
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -470,11 +464,11 @@ void Http::async_get(std::function<void(Response&&)> on_response, std::string_vi
     asio::co_spawn(
         async_ioc_,
         do_session(std::string(url), http::verb::get,
-            [on_response = on_response](Response&& response) mutable {
+            [on_response](Response&& response) mutable {
                 on_response(std::move(response));
             },
             std::move(headers)),
-        [on_response = std::move(on_response)](std::exception_ptr e) {
+        [on_response](std::exception_ptr e) {
             if (e) {
                 try {
                     std::rethrow_exception(e);
@@ -495,11 +489,11 @@ void Http::async_post(
     asio::co_spawn(
         async_ioc_,
         do_session(std::string(url), http::verb::post,
-            [on_response = on_response](Response&& response) mutable {
+            [on_response](Response&& response) mutable {
                 on_response(std::move(response));
             },
             std::move(headers), std::string(data)),
-        [on_response = std::move(on_response)](std::exception_ptr e) {
+        [on_response](std::exception_ptr e) {
             if (e) {
                 try {
                     std::rethrow_exception(e);
@@ -520,11 +514,11 @@ void Http::async_put(
     asio::co_spawn(
         async_ioc_,
         do_session(std::string(url), http::verb::put,
-            [on_response = on_response](Response&& response) mutable {
+            [on_response](Response&& response) mutable {
                 on_response(std::move(response));
             },
             std::move(headers), std::string(data)),
-        [on_response = std::move(on_response)](std::exception_ptr e) {
+        [on_response](std::exception_ptr e) {
             if (e) {
                 try {
                     std::rethrow_exception(e);
@@ -545,11 +539,11 @@ void Http::async_patch(
     asio::co_spawn(
         async_ioc_,
         do_session(std::string(url), http::verb::patch,
-            [on_response = on_response](Response&& response) mutable {
+            [on_response](Response&& response) mutable {
                 on_response(std::move(response));
             },
             std::move(headers), std::string(data)),
-        [on_response = std::move(on_response)](std::exception_ptr e) {
+        [on_response](std::exception_ptr e) {
             if (e) {
                 try {
                     std::rethrow_exception(e);
@@ -570,11 +564,11 @@ void Http::async_del(
     asio::co_spawn(
         async_ioc_,
         do_session(std::string(url), http::verb::delete_,
-            [on_response = on_response](Response&& response) mutable {
+            [on_response](Response&& response) mutable {
                 on_response(std::move(response));
             },
             std::move(headers), std::string(data)),
-        [on_response = std::move(on_response)](std::exception_ptr e) {
+        [on_response](std::exception_ptr e) {
             if (e) {
                 try {
                     std::rethrow_exception(e);

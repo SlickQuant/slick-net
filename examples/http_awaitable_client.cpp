@@ -1,44 +1,19 @@
 #include <slick/net/http.hpp>
-#include <slick/net/logging.h>
+#include <slick/net/logging.hpp>
 #include <nlohmann/json.hpp>
 #include <slick/logger.hpp>
 #include <boost/asio.hpp>
-// #include <boost/asio/io_context.hpp>
-// #include <boost/asio/co_spawn.hpp>
 
 using namespace slick::net;
 using namespace slick::logger;
 
 namespace {
+auto &logger = Logger::instance();
 void configure_slick_net_logging()
 {
     set_log_handler([](slick::net::LogLevel level, const char* format_text,
                        std::format_args args) {
-        
-        std::string message;
-        try {
-            message = std::vformat(format_text, args);
-        } catch (...) {
-            message = std::string(format_text);
-        }
-
-        switch (level) {
-            case slick::net::LogLevel::Trace:
-                LOG_TRACE(format_text, args);
-                break;
-            case slick::net::LogLevel::Debug:
-                LOG_DEBUG("slick-net: {}", message);
-                break;
-            case slick::net::LogLevel::Info:
-                LOG_INFO("slick-net: {}", message);
-                break;
-            case slick::net::LogLevel::Warn:
-                LOG_WARN("slick-net: {}", message);
-                break;
-            case slick::net::LogLevel::Error:
-                LOG_ERROR(format_text, args);
-                break;
-        }
+        logger.log(static_cast<slick::logger::LogLevel>(level), format_text, args);
     });
 }
 
@@ -297,7 +272,6 @@ boost::asio::awaitable<void> run_all_examples()
 int main()
 {
     // Initialize logger
-    auto &logger = Logger::instance();
     logger.add_console_sink(true, true);
     logger.set_level(slick::logger::LogLevel::L_DEBUG);
     logger.init(1024);

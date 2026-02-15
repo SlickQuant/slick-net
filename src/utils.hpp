@@ -12,7 +12,7 @@ inline std::tuple<std::string, std::string, std::string, bool> parse_url(std::st
     uint_fast16_t port = (uint_fast16_t)-1;
     bool use_ssl = true;  // Default to SSL
 
-    std::string protoco("https");
+    std::string protocol("https");
     auto pos = url.find("://");
     if (pos == std::string::npos)
     {
@@ -30,7 +30,7 @@ inline std::tuple<std::string, std::string, std::string, bool> parse_url(std::st
     }
     else
     {
-        protoco = std::string(url.substr(0, pos));
+        protocol = std::string(url.substr(0, pos));
         auto host_begin = pos + 3;
         pos = url.find("/", host_begin);
         if (pos == std::string::npos)
@@ -54,11 +54,11 @@ inline std::tuple<std::string, std::string, std::string, bool> parse_url(std::st
 
     if (port == (uint_fast16_t)-1)
     {
-        port = (protoco == "http") ? 80 : 443;
+        port = (protocol == "http") ? 80 : 443;
     }
 
     // Determine if SSL should be used
-    use_ssl = (protoco == "https");
+    use_ssl = (protocol == "https");
 
     return {host, target, std::to_string(port), use_ssl};
 }

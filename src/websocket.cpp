@@ -1,68 +1,217 @@
-#include <slick/net/websocket.hpp>
-#include <slick/net/logging.h>
+#include "websocket_impl.hpp"
 
-#include <memory>
-#include <utility>
+namespace slick::net::detail {
 
-#define Websocket SlickNetLegacyWebsocket
-#define LOG_DEBUG(...) ::slick::net::log_message(::slick::net::LogLevel::Debug, __VA_ARGS__)
-#define LOG_INFO(...) ::slick::net::log_message(::slick::net::LogLevel::Info, __VA_ARGS__)
-#define LOG_WARN(...) ::slick::net::log_message(::slick::net::LogLevel::Warn, __VA_ARGS__)
-#define LOG_ERROR(...) ::slick::net::log_message(::slick::net::LogLevel::Error, __VA_ARGS__)
-#define LOG_TRACE(...) ::slick::net::log_message(::slick::net::LogLevel::Trace, __VA_ARGS__)
-#include "legacy/websocket_legacy_impl.h"
-#undef LOG_TRACE
-#undef LOG_ERROR
-#undef LOG_WARN
-#undef LOG_INFO
-#undef LOG_DEBUG
-#undef Websocket
+asio::io_context ioc_;
+ssl::context ctx_{ssl::context::tlsv12_client};
+std::thread service_thread_;
+std::atomic_bool init_service_thread_{ false };
+std::atomic_bool run_;
 
-namespace slick::net {
-namespace {
-
-using LegacyWebsocket = SlickNetLegacyWebsocket;
-
-Websocket::Status to_status(LegacyWebsocket::Status status) {
-    switch (status) {
-        case LegacyWebsocket::Status::CONNECTING:
-            return Websocket::Status::CONNECTING;
-        case LegacyWebsocket::Status::CONNECTED:
-            return Websocket::Status::CONNECTED;
-        case LegacyWebsocket::Status::DISCONNECTING:
-            return Websocket::Status::DISCONNECTING;
-        case LegacyWebsocket::Status::DISCONNECTED:
-        default:
-            return Websocket::Status::DISCONNECTED;
+extern "C" inline void __signal_handler(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        Websocket::shutdown();
     }
 }
 
-} // namespace
+void install_signal_handlers() {
+    std::signal(SIGINT, __signal_handler);
+    std::signal(SIGTERM, __signal_handler);
+}
 
-struct Websocket::Impl {
-    explicit Impl(
-        std::string url,
-        std::function<void()> &&onConnectedCallback,
-        std::function<void()> &&onDisconnectedCallback,
-        std::function<void(const char*, std::size_t)> &&onDataCallback,
-        std::function<void(std::string err)> &&onErrorCallback)
-        : legacy_(std::make_shared<LegacyWebsocket>(
-            std::move(url),
-            std::move(onConnectedCallback),
-            std::move(onDisconnectedCallback),
-            std::move(onDataCallback),
-            std::move(onErrorCallback))) {}
-
-    std::shared_ptr<LegacyWebsocket> legacy_;
+// Ensure Websocket::shutdown() is called at process exit.
+struct WebsocketServiceTerminater {
+    ~WebsocketServiceTerminater() {
+        Websocket::shutdown();
+    }
 };
+
+WebsocketServiceTerminater s_websocket_service_terminater;
+
+} // namespace slick::net::detail
+
+namespace slick::net {
+
+void Websocket::Impl::do_write() {
+    if (status_.load(std::memory_order_relaxed) != Status::CONNECTED) [[unlikely]] {
+        if (status_.load(std::memory_order_relaxed) == Status::CONNECTING) {
+            // Still connecting, repost do_write to try later.
+            auto executor = use_ssl_ ? wss_->get_executor() : ws_->get_executor();
+            asio::post(executor, [self = shared_from_this()]() {
+                self->do_write();
+            });
+        }
+        // Else: socket close is called.
+        return;
+    }
+    // Read is already within the executor strand, safe to access w_cursor_.
+    auto [msg, len] = w_buffer_.read(w_cursor_);
+    if (msg && len) {
+        bool is_binary = msg[0];
+        ++msg;
+        --len;
+
+        LOG_DEBUG("--> {}", std::string_view(msg, len));
+        // Only one async_write at a time - this is guaranteed by in_writting_ flag.
+        if (use_ssl_) {
+            wss_->binary(is_binary);
+            wss_->async_write(
+                asio::buffer(msg, len),
+                beast::bind_front_handler(
+                    &Websocket::Impl::on_write,
+                    shared_from_this()));
+        } else {
+            ws_->binary(is_binary);
+            ws_->async_write(
+                asio::buffer(msg, len),
+                beast::bind_front_handler(
+                    &Websocket::Impl::on_write,
+                    shared_from_this()));
+        }
+    }
+    else {
+        // No more data to write, release the write lock.
+        in_writting_.store(false, std::memory_order_release);
+    }
+}
+
+void Websocket::Impl::on_write(beast::error_code ec, std::size_t bytes_transferred) {
+    boost::ignore_unused(bytes_transferred);
+    if(ec) {
+        if (detail::run_.load(std::memory_order_relaxed) &&
+            status_.load(std::memory_order_relaxed) == Status::CONNECTED &&
+            ec != beast::websocket::error::closed &&
+            ec != asio::error::eof &&
+            ec != asio::error::operation_aborted &&
+            ec != ssl::error::stream_truncated &&
+            !(ec.value() == 995 && ec.category() == boost::system::system_category())) {
+            on_error_(std::format("Failed to write {}", ec.message()));
+            close();
+        }
+        in_writting_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // Continue writing next message if available.
+    // This is safe because we're already in the strand and in_writting_ is still true.
+    do_write();
+}
+
+void Websocket::Impl::on_read(beast::error_code ec, std::size_t bytes_transferred) {
+    if(ec) {
+        if (detail::run_.load(std::memory_order_relaxed) &&
+            status_.load(std::memory_order_relaxed) == Status::CONNECTED &&
+            ec != beast::websocket::error::closed &&
+            ec != asio::error::eof &&
+            ec != asio::error::operation_aborted &&
+            ec != ssl::error::stream_truncated &&
+            !(ec.value() == 995 && ec.category() == boost::system::system_category())) {
+            on_error_(std::format("Failed to read {}", ec.message()));
+            close();
+        }
+        else if (status_.load(std::memory_order_relaxed) == Status::CONNECTED) {
+            // EOF or websocket::error::closed means graceful disconnect.
+            status_.store(Status::DISCONNECTED, std::memory_order_release);
+            on_diconnected_();
+        }
+        return;
+    }
+
+    if (detail::run_.load(std::memory_order_relaxed) &&
+        status_.load(std::memory_order_relaxed) == Status::CONNECTED) {
+        LOG_TRACE("<-- {}", std::string((const char*)r_buffer_.data().data(), bytes_transferred));
+        on_data_((const char*)r_buffer_.data().data(), bytes_transferred);
+        r_buffer_.consume(bytes_transferred);
+
+        // Read next message.
+        if (use_ssl_) {
+            wss_->async_read(
+                r_buffer_,
+                beast::bind_front_handler(
+                    &Websocket::Impl::on_read,
+                    shared_from_this()));
+        } else {
+            ws_->async_read(
+                r_buffer_,
+                beast::bind_front_handler(
+                    &Websocket::Impl::on_read,
+                    shared_from_this()));
+        }
+    }
+}
+
+void Websocket::Impl::on_close(beast::error_code ec) {
+    if (ec && detail::run_.load(std::memory_order_relaxed) &&
+        ec != beast::websocket::error::closed &&
+        ec != asio::error::eof &&
+        ec != asio::error::operation_aborted &&
+        ec != ssl::error::stream_truncated &&
+        !(ec.value() == 995 && ec.category() == boost::system::system_category())) {
+        on_error_(ec.message());
+    }
+
+    // If we get here then the connection is closed gracefully.
+    LOG_INFO("Websocket {} closed", url_);
+    status_.store(Status::DISCONNECTED, std::memory_order_release);
+    on_diconnected_();
+}
+
+bool Websocket::Impl::close() {
+    if (status_.load(std::memory_order_relaxed) < Status::DISCONNECTING) {
+        LOG_INFO("Closing {}", url_);
+        status_.store(Status::DISCONNECTING, std::memory_order_release);
+        // Close the WebSocket connection.
+        if (use_ssl_) {
+            wss_->async_close(
+                websocket::close_code::normal,
+                beast::bind_front_handler(
+                    &Websocket::Impl::on_close,
+                    shared_from_this()));
+        } else {
+            ws_->async_close(
+                websocket::close_code::normal,
+                beast::bind_front_handler(
+                    &Websocket::Impl::on_close,
+                    shared_from_this()));
+        }
+        return true;
+    }
+    return false;
+}
+
+void Websocket::Impl::send(const char* buffer, size_t len, bool is_binary) {
+    if (status_.load(std::memory_order_relaxed) > Status::CONNECTED) {
+        LOG_WARN("WebSocket not connected, cannot send data.");
+        return;
+    }
+    auto l = static_cast<uint32_t>(len) + 1;   // +1 for is_bool flag
+    auto index = w_buffer_.reserve(l);
+    *w_buffer_[index] = static_cast<char>(is_binary);
+    memcpy(w_buffer_[index + 1], buffer, len);
+    w_buffer_.publish(index, l);
+
+    // Always post to the executor to ensure thread-safe write initiation.
+    auto executor = use_ssl_ ? wss_->get_executor() : ws_->get_executor();
+    asio::post(executor, [self = shared_from_this()]() {
+        // Check and set in_writting_ atomically within the executor context.
+        bool expected = false;
+        if (self->in_writting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            self->do_write();
+        }
+    });
+}
+
+void Websocket::Impl::send_binary_data(const char* buffer, size_t len) {
+    send(buffer, len, true);
+}
 
 Websocket::Websocket(
     std::string url,
     std::function<void()> &&onConnectedCallback,
     std::function<void()> &&onDiconnectedCallback,
     std::function<void(const char*, std::size_t)> &&onDataCallback,
-    std::function<void(std::string err)> &&onErrorCallback)
-    : impl_(std::make_unique<Impl>(
+    std::function<void(std::string &&err)> &&onErrorCallback)
+    : impl_(std::make_shared<Impl>(
         std::move(url),
         std::move(onConnectedCallback),
         std::move(onDiconnectedCallback),
@@ -74,31 +223,38 @@ Websocket::Websocket(Websocket&&) noexcept = default;
 Websocket& Websocket::operator=(Websocket&&) noexcept = default;
 
 void Websocket::open() {
-    impl_->legacy_->open();
+    impl_->open();
 }
 
 bool Websocket::close() {
-    return impl_->legacy_->close();
+    return impl_->close();
 }
 
 void Websocket::send(const char* buffer, std::size_t len, bool is_binary) {
-    impl_->legacy_->send(buffer, len, is_binary);
+    impl_->send(buffer, len, is_binary);
 }
 
 void Websocket::send_binary_data(const char* buffer, std::size_t len) {
-    impl_->legacy_->send_binary_data(buffer, len);
-}
-
-void Websocket::shutdown() {
-    LegacyWebsocket::shutdown();
+    impl_->send_binary_data(buffer, len);
 }
 
 Websocket::Status Websocket::status() const noexcept {
-    return to_status(impl_->legacy_->status());
+    return impl_->status();
 }
 
 bool Websocket::is_running() noexcept {
-    return LegacyWebsocket::is_running();
+    return detail::run_.load(std::memory_order_relaxed);
+}
+
+void Websocket::shutdown() {
+    if (detail::run_.load(std::memory_order_relaxed)) {
+        LOG_DEBUG("Shutting down WebSocket service thread.");
+        detail::run_.store(false, std::memory_order_release);
+        detail::ioc_.stop();
+        if (detail::service_thread_.joinable()) {
+            detail::service_thread_.join();
+        }
+    }
 }
 
 } // namespace slick::net

@@ -38,7 +38,7 @@ if (NOT slick-queue_FOUND)
     FetchContent_Declare(
         slick-queue
         GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
-        GIT_TAG v1.2.3 # See https://github.com/SlickQuant/slick-net/releases for latest version
+        GIT_TAG v1.4.1 # See https://github.com/SlickQuant/slick-net/releases for latest version
     )
     FetchContent_MakeAvailable(slick-queue)
 else()
@@ -52,6 +52,7 @@ add_library(slick-net STATIC
     src/http.cpp
     src/http_stream.cpp
     src/websocket.cpp
+    src/websocket_session.cpp
     src/logging.cpp
 )
 add_library(slick::net ALIAS slick-net)
@@ -65,6 +66,7 @@ target_include_directories(slick-net PUBLIC
 )
 target_link_libraries(slick-net PUBLIC slick::queue Boost::asio Boost::beast Boost::context OpenSSL::SSL OpenSSL::Crypto)
 set_target_properties(slick-net PROPERTIES EXPORT_NAME net)
+
 
 if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "-O2")
@@ -103,7 +105,7 @@ if(ENABLE_ASAN)
   endif()
 endif()
 
-option(BUILD_SLICK_NET_TESTS "Build tests" ON)
+option(BUILD_SLICK_NET_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 if (BUILD_SLICK_NET_TESTS)
     message(STATUS "Building slick-net tests")
     enable_testing()
@@ -112,7 +114,7 @@ else()
     message(STATUS "Skipping slick-net tests")
 endif()
 
-option(BUILD_SLICK_NET_EXAMPLES "Build examples" ON)
+option(BUILD_SLICK_NET_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 if(BUILD_SLICK_NET_EXAMPLES)
     message(STATUS "Building slick::net examples")
     add_subdirectory(examples)

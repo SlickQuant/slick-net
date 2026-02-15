@@ -17,6 +17,8 @@ if (NOT slick-logger_FOUND)
         GIT_TAG v1.0.4
     )
     FetchContent_MakeAvailable(slick-logger)
+else()
+    message(STATUS "Found slick-logger: ${slick-logger_VERSION}")
 endif()
 
 add_executable(websocket_client_example websocket_client.cpp)

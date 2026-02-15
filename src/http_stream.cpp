@@ -1,21 +1,27 @@
-#include <slick/net/http.hpp>
+#include <slick/net/http_stream.hpp>
+#include <slick/net/logging.hpp>
+#include "utils.hpp"
 
-// #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/beast/core.hpp>
-// #include <boost/beast/websocket.hpp>
-// #include <boost/beast/websocket/ssl.hpp>
+#include <boost/beast/version.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/asio/ssl.hpp>
-// #include <boost/asio/strand.hpp>
 #include <boost/asio/co_spawn.hpp>
-// #include <boost/asio/signal_set.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/stream.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/as_tuple.hpp>
-#include "utils.hpp"
+
+#include <csignal>
+#include <thread>
+
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace asio = boost::asio;
+namespace ssl = asio::ssl;
+using tcp = boost::asio::ip::tcp;
 
 namespace slick::net {
 
@@ -23,7 +29,7 @@ namespace {
     asio::io_context ioc_;
     std::thread service_thread_;
     std::atomic_bool init_service_thread_{ false };
-    std::atomic_bool _run_ {false};
+    std::atomic_bool run_ {false};
 
     ssl::context ctx_ = []() {
         ssl::context ctx{ssl::context::tlsv12_client};
@@ -73,23 +79,13 @@ HttpStream::HttpStream(
 }
 
 HttpStream::~HttpStream() = default;
-HttpStream::HttpStream(HttpStream&&) noexcept = default;
-HttpStream& HttpStream::operator=(HttpStream&&) noexcept = default;
-
-void HttpStream::open() {
-    impl_->open();
-}
-
-void HttpStream::close() {
-    impl_->close();
-}
 
 bool HttpStream::is_running() noexcept {
     return run_.load(std::memory_order_relaxed);
 }
 
 HttpStream::Status HttpStream::status() const noexcept {
-    return impl_->status();
+    return status_.load(std::memory_order_relaxed);
 }
 
 void HttpStream::open()
@@ -114,8 +110,8 @@ void HttpStream::open()
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
                 }
-                catch (const std::exception& e) {
-                    self->on_error_("HttpStream service thread error: " + ex.what());
+                catch (const std::exception& ex) {
+                    self->on_error_(std::format("HttpStream service thread error: {}",ex.what()));
                     ioc_.restart();
                 }
             }
@@ -131,19 +127,19 @@ void HttpStream::open()
                 try {
                     std::rethrow_exception(e);
                 } catch (const std::exception& ex) {
-                    self->on_error_("HttpStream session error: " + ex.what());
+                    self->on_error_(std::format("HttpStream session error: {}", ex.what()));
                 }
             }
         });
 }
 
-inline void HttpStream::close()
+void HttpStream::close()
 {
     LOG_INFO("Closing HTTP Stream {}", url_);
     should_close_.store(true, std::memory_order_release);
 }
 
-inline void HttpStream::shutdown() {
+void HttpStream::shutdown() {
     bool expected = true;
     if (run_.compare_exchange_strong(expected, false, std::memory_order_acq_rel, std::memory_order_relaxed))
     {
@@ -165,7 +161,7 @@ asio::awaitable<void> HttpStream::do_stream_session() {
 asio::awaitable<void> HttpStream::do_stream_session_ssl() {
     auto executor = co_await asio::this_coro::executor;
     auto resolver = asio::ip::tcp::resolver{ executor };
-    auto stream = ssl::stream<beast::tcp_stream>{ executor, Http::ctx_ };
+    auto stream = ssl::stream<beast::tcp_stream>{ executor, ctx_ };
 
     try {
         // Set SNI Hostname

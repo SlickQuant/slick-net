@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <slick/net/logging.h>
+#include <slick/net/logging.hpp>
 
 #include <atomic>
 #include <format>
@@ -75,10 +75,10 @@ TEST(LoggingTest, HandlerReceivesUnformattedArgs) {
     std::string captured_format;
 
     set_log_handler([&](LogLevel, std::string_view format_text, std::format_args args) {
-        // captured_format = std::string(format_text);
+        captured_format = std::string(format_text);
         // Verify we can format
         try {
-            captured_format = std::vformat(format_text, args);
+            auto format = std::vformat(format_text, args);
             calls.fetch_add(1, std::memory_order_relaxed);
         } catch (...) {
             // Should not throw

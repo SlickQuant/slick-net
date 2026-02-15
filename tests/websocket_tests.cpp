@@ -10,12 +10,6 @@
 #include <string>
 #include <algorithm>
 
-// #define LOG_DEBUG(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[DEBUG] " << std::format(fmt, __VA_ARGS__) << std::endl
-// #define LOG_INFO(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[INFO] " << std::format(fmt, __VA_ARGS__) << std::endl
-// #define LOG_WARN(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[WARNING] " << std::format(fmt, __VA_ARGS__) << std::endl
-// #define LOG_ERROR(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[ERROR] " << std::format(fmt, __VA_ARGS__) << std::endl
-// #define LOG_TRACE(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[TRACE] " << std::format(fmt, __VA_ARGS__) << std::endl
-
 #include <slick/net/websocket.hpp>
 
 namespace slick::net {
@@ -26,7 +20,7 @@ public:
     MOCK_METHOD(void, onConnected, (), ());
     MOCK_METHOD(void, onDisconnected, (), ());
     MOCK_METHOD(void, onData, (const char*, std::size_t), ());
-    MOCK_METHOD(void, onError, (std::string), ());
+    MOCK_METHOD(void, onError, (std::string&&), ());
 };
 
 // Helper class to synchronize async events in tests
@@ -89,16 +83,16 @@ TEST_F(WebsocketTest, ConstructorParsesWssUrlWithHostAndPath) {
     std::atomic<bool> data_called{false};
     std::atomic<bool> error_called{false};
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
-        [&](std::string) { error_called = true; }
+        [&](std::string&&) { error_called = true; }
     );
 
     // Check URL parsing
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 }
 
 TEST_F(WebsocketTest, ConstructorParsesWssUrlWithPort) {
@@ -107,15 +101,15 @@ TEST_F(WebsocketTest, ConstructorParsesWssUrlWithPort) {
     std::atomic<bool> data_called{false};
     std::atomic<bool> error_called{false};
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws (
         "wss://ws.postman-echo.com/raw:443/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
-        [&](std::string) { error_called = true; }
+        [&](std::string&&) { error_called = true; }
     );
 
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 }
 
 TEST_F(WebsocketTest, ConstructorParsesWsUrl) {
@@ -125,16 +119,16 @@ TEST_F(WebsocketTest, ConstructorParsesWsUrl) {
     std::atomic<bool> data_called{false};
     std::atomic<bool> error_called{false};
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "ws://localhost:8080/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
-        [&](std::string) { error_called = true; }
+        [&](std::string&&) { error_called = true; }
     );
 
     // Should successfully create websocket object and parse URL
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 
     // Note: This test verifies URL parsing for plain WebSocket.
     // To test actual ws:// connections, run a local WebSocket server:
@@ -147,15 +141,15 @@ TEST_F(WebsocketTest, ConstructorParsesHostOnlyUrl) {
     std::atomic<bool> data_called{false};
     std::atomic<bool> error_called{false};
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "echo.websocket.org",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
-        [&](std::string) { error_called = true; }
+        [&](std::string&&) { error_called = true; }
     );
 
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 }
 
 TEST_F(WebsocketTest, ConstructorParsesUrlWithCustomPort) {
@@ -169,7 +163,7 @@ TEST_F(WebsocketTest, ConstructorParsesUrlWithCustomPort) {
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
-        [&](std::string) { error_called = true; }
+        [&](std::string&&) { error_called = true; }
     );
 
     EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
@@ -186,7 +180,7 @@ TEST_F(WebsocketTest, StatusTransitions) {
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
-        [&](std::string) { error_called = true; }
+        [&](std::string&&) { error_called = true; }
     );
 
     // Initial state should be DISCONNECTED
@@ -207,7 +201,7 @@ TEST_F(WebsocketTest, CallbacksAreStored) {
         [&]() { connected_count++; },
         [&]() { disconnected_count++; },
         [&](const char*, std::size_t) { data_count++; },
-        [&](std::string) { error_count++; }
+        [&](std::string&&) { error_count++; }
     );
 
     // We can't directly invoke the callbacks since they're private,
@@ -241,7 +235,7 @@ TEST_F(WebsocketTest, ConnectToEchoServer) {
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char*, std::size_t) {},
-        [&](std::string err) {
+        [&](std::string &&err) {
             error_message = err;
             error_sync.notify();
         }
@@ -274,7 +268,7 @@ TEST_F(WebsocketTest, CloseConnection) {
         [&]() { connected_sync.notify(); },
         [&]() { disconnected_sync.notify(); },
         [&](const char*, std::size_t) {},
-        [&](std::string) {}
+        [&](std::string&&) {}
     );
 
     ws->open();
@@ -303,8 +297,8 @@ TEST_F(WebsocketTest, InvalidHostnameError) {
         [&]() {},
         [&]() {},
         [&](const char*, std::size_t) {},
-        [&](std::string err) {
-            error_message = err;
+        [&](std::string &&err) {
+            error_message = std::move(err);
             error_sync.notify();
         }
     );
@@ -335,7 +329,7 @@ TEST_F(WebsocketTest, SendAndReceiveEcho) {
             received_data.assign(data, len);
             data_sync.notify();
         },
-        [&](std::string) {}
+        [&](std::string&&) {}
     );
 
     ws->open();
@@ -372,7 +366,7 @@ TEST_F(WebsocketTest, SendMultipleMessages) {
             received_messages.emplace_back(data, len);
             messages_received++;
         },
-        [&](std::string) {}
+        [&](std::string&&) {}
     );
 
     ws->open();
@@ -411,7 +405,7 @@ TEST_F(WebsocketTest, SendLargeMessage) {
             received_data.assign(data, len);
             data_sync.notify();
         },
-        [&](std::string) {}
+        [&](std::string&&) {}
     );
 
     ws->open();
@@ -449,7 +443,7 @@ TEST_F(WebsocketTest, SendBinaryData) {
             received_data.assign(data, data + len);
             data_sync.notify();
         },
-        [&](std::string e) {
+        [&](std::string &&e) {
             printf("%s\n", e.c_str());
             error_sync.notify();
         }
@@ -498,7 +492,7 @@ TEST_F(WebsocketTest, ConcurrentSends) {
         [&](const char*, std::size_t) {
             messages_received++;
         },
-        [&](std::string) {}
+        [&](std::string&&) {}
     );
 
     ws->open();
@@ -553,7 +547,7 @@ TEST_F(WebsocketTest, MultipleWebsocketInstances) {
             },
             [&]() {},
             [&](const char*, std::size_t) {},
-            [&](std::string) {}
+            [&](std::string&&) {}
         );
         websockets.push_back(ws);
     }
@@ -595,7 +589,7 @@ TEST_F(WebsocketTest, StatusTransitionsOnConnect) {
         },
         [&]() {},
         [&](const char*, std::size_t) {},
-        [&](std::string) {}
+        [&](std::string&&) {}
     );
 
     EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
@@ -625,7 +619,7 @@ TEST_F(WebsocketTest, CannotSendWhenDisconnected) {
         [&]() {},
         [&]() {},
         [&](const char*, std::size_t) {},
-        [&](std::string) {}
+        [&](std::string&&) {}
     );
 
     EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
@@ -670,7 +664,7 @@ TEST_F(WebsocketTest, MultipleErrorCallbacks) {
         [&]() {},
         [&]() {},
         [&](const char*, std::size_t) {},
-        [&](std::string err) {
+        [&](std::string &&err) {
             std::lock_guard<std::mutex> lock(error_mutex);
             error_messages.push_back(err);
             error_count++;
@@ -702,7 +696,7 @@ TEST_F(WebsocketTest, ReconnectAfterError) {
         [&]() {},
         [&]() {},
         [&](const char*, std::size_t) {},
-        [&](std::string) {
+        [&](std::string&&) {
             error_count++;
             first_error_sync.notify();
         }

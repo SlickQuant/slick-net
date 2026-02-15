@@ -31,8 +31,8 @@ public:
 
     HttpStream(const HttpStream&) = delete;
     HttpStream& operator=(const HttpStream&) = delete;
-    HttpStream(HttpStream&&) noexcept;
-    HttpStream& operator=(HttpStream&&) noexcept;
+    HttpStream(HttpStream&&) noexcept = delete;
+    HttpStream& operator=(HttpStream&&) noexcept = delete;
 
     void open();
     void close();

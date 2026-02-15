@@ -60,9 +60,9 @@ target_link_libraries(your_target PRIVATE slick::net)
 Internal slick-net logs are routed via runtime hooks:
 
 ```cpp
-#include <slick/net/logging.h>
+#include <slick/net/logging.hpp>
 
-slick::net::set_log_handler([](slick::net::LogLevel level, std::string_view message) {
+slick::net::set_log_handler([](slick::net::LogLevel level, const char* format_text, std::format_args args) {
     // Route to your logger
 });
 
@@ -75,13 +75,12 @@ slick::net::clear_log_handler();
 ### Basic WebSocket Client
 
 ```cpp
-#include <slick/net/websocket.h>
-#include <memory>
+#include <slick/net/websocket.hpp>
 
 using namespace slick::net;
 
 int main() {
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",           // WebSocket URL
         []() {                                // onConnected
             std::cout << "Connected!\n";
@@ -97,11 +96,11 @@ int main() {
         }
     );
     
-    ws->open();
+    ws.open();
     
     // Send a message
     std::string message = "Hello, WebSocket!";
-    ws->send(message.data(), message.size());
+    ws.send(message.data(), message.size());
     
     // Keep the application running
     while(Websocket::is_running()) {
@@ -115,9 +114,8 @@ int main() {
 ### Advanced Usage with JSON
 
 ```cpp
-#include <slick/net/websocket.h>
+#include <slick/net/websocket.hpp>
 #include <nlohmann/json.hpp>
-#include <memory>
 
 using namespace slick::net;
 using json = nlohmann::json;
@@ -287,7 +285,7 @@ Websocket(
     std::function<void()> onConnected,
     std::function<void()> onDisconnected,
     std::function<void(const char*, std::size_t)> onData,
-    std::function<void(std::string)> onError
+    std::function<void(std::string&&)> onError
 )
 ```
 
@@ -315,7 +313,7 @@ HttpStream(
     std::function<void()> onConnected,
     std::function<void()> onDisconnected,
     std::function<void(const char*, std::size_t)> onData,
-    std::function<void(std::string)> onError,
+    std::function<void(std::string&&)> onError,
     std::vector<std::pair<std::string, std::string>>&& headers = {}
 )
 ```
