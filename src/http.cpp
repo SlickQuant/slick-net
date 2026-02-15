@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <utility>
+#include <thread>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/beast/core.hpp>
