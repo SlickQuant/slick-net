@@ -42,7 +42,7 @@ jobs:
       run: |
         git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
         cd ${{ github.workspace }}/vcpkg
-        git checkout master
+        git checkout 2025.12.12
 
     - name: Bootstrap vcpkg (Windows)
       if: runner.os == 'Windows'
