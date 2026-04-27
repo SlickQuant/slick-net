@@ -1,3 +1,22 @@
+# [v2.0.1] - 2026-04-27
+
+## Fixed
+- WebSocket `co_spawn` completion handler now guards `on_error_()` with a `run_` check, suppressing spurious error callbacks after shutdown.
+- Fixed use-after-free in WebSocket tests where `[&]` lambda captures referenced destroyed stack variables when async callbacks fired via IOCP after the test function returned. Affected tests (`ConnectToEchoServer`, `InvalidHostnameError`, `MultipleErrorCallbacks`, `ReconnectAfterError`, `PlainWebsocket_UrlParsing`) now use `shared_ptr` captures to extend captured variable lifetimes.
+
+## Tests
+- Added 10 comprehensive `Reconnect_*` tests verifying correct behavior when reconnecting by creating a new `Websocket` instance during normal operation (service thread always running):
+  - Graceful close → new-object reconnect
+  - Three consecutive reconnect cycles with data verification
+  - Reconnect initiated from within `on_disconnected_` callback (deadlock check)
+  - Reconnect initiated from within `on_error_` callback
+  - Reconnect after closing from within `on_data_` callback
+  - Reconnect after simulated server-side close
+  - Cross-session data integrity (no bleed via shared `io_context`/SSL context)
+  - Rapid successive cycles (service thread stability)
+  - Callback ordering across sessions (`connected` → `data` → `disconnected`)
+  - Concurrent dual-instance connect (shared SSL context)
+
 # [v2.0.0] - 2026-02-15
 
 ## Changed

@@ -84,7 +84,9 @@ void Websocket::Impl::open() {
                     std::rethrow_exception(eptr);
                 } catch (const std::exception& e) {
                     self->status_.store(Status::DISCONNECTED, std::memory_order_release);
-                    self->on_error_(e.what());
+                    if (detail::run_.load(std::memory_order_relaxed)) {
+                        self->on_error_(e.what());
+                    }
                 }
             }
         });
