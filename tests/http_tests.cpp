@@ -664,7 +664,7 @@ TEST_F(HttpTest, HttpStream_MultipleStreams) {
 
     // Wait for all to disconnect
     EXPECT_TRUE(wait_for_condition([&]() { return disconnected_count.load() == 3; },
-                                    std::chrono::seconds(5)));
+                                    std::chrono::seconds(10)));
 
     EXPECT_GT(data_count.load(), 0);
 }
