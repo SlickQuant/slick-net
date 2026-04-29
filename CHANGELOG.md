@@ -3,6 +3,7 @@
 ## Chaged
 - Updated SSE endpoint in excamples and tests
 - Added timeout handling in HTTP stream sessions
+- Update WebSocket test URLs to use echo.websocket.org for improved reliability
 
 ## Fixed
 - WebSocket `co_spawn` completion handler now guards `on_error_()` with a `run_` check, suppressing spurious error callbacks after shutdown.
