@@ -251,9 +251,12 @@ TEST_F(HttpTest, SyncDelete_WithBody) {
 
     EXPECT_TRUE(response.is_ok()) << "Status: " << response.result_code << ", Response: " << response.result_text;
     EXPECT_EQ(response.result_code, 200);
+    EXPECT_FALSE(response.result_text.empty());
 
-        EXPECT_TRUE(response.is_ok());
-    EXPECT_EQ(response.result_code, 200);
+    EXPECT_NO_THROW({
+        auto json = nlohmann::json::parse(response.result_text);
+        EXPECT_TRUE(json.contains("json") || json.contains("data"));
+    });
 }
 
 // ======================== Asynchronous GET Tests ========================
@@ -530,7 +533,7 @@ TEST_F(HttpTest, HttpStream_BasicConnection) {
     std::string last_error;
 
     auto stream = std::make_shared<HttpStream>(
-        "https://sse.dev/test",
+        "https://stream.wikimedia.org/v2/stream/recentchange",
         [&]() {
             connected.store(true);
         },
@@ -573,7 +576,7 @@ TEST_F(HttpTest, HttpStream_CustomHeaders) {
 
     std::vector<std::pair<std::string, std::string>> headers = {{"X-Custom-Header", "test"}};
     auto stream = std::make_shared<HttpStream>(
-        "https://sse.dev/test",
+        "https://stream.wikimedia.org/v2/stream/recentchange",
         [&]() { connected.store(true); },
         [&]() { disconnected.store(true); },
         [&](const char* data, size_t size) {
@@ -637,7 +640,7 @@ TEST_F(HttpTest, HttpStream_MultipleStreams) {
     // Create 3 concurrent streams
     for (int i = 0; i < 3; ++i) {
         auto stream = std::make_shared<HttpStream>(
-            "https://sse.dev/test",
+            "https://stream.wikimedia.org/v2/stream/recentchange",
             [&]() { connected_count++; },
             [&]() { disconnected_count++; },
             [&](const char*, size_t) { data_count++; },
@@ -671,7 +674,7 @@ TEST_F(HttpTest, HttpStream_StatusCheck) {
     std::atomic<bool> disconnected{false};
 
     auto stream = std::make_shared<HttpStream>(
-        "https://sse.dev/test",
+        "https://stream.wikimedia.org/v2/stream/recentchange",
         [&]() { connected.store(true); },
         [&]() { disconnected.store(true); },
         [](const char*, size_t) {},

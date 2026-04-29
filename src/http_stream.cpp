@@ -421,6 +421,20 @@ void HttpStream::parse_sse_chunk(const char* data, size_t size) {
     // Append new data to buffer
     sse_buffer_.append(data, size);
 
+    // Normalize CRLF and bare CR to LF so event/line splitting is uniform
+    for (size_t i = 0; i < sse_buffer_.size(); ) {
+        if (sse_buffer_[i] == '\r') {
+            if (i + 1 < sse_buffer_.size() && sse_buffer_[i + 1] == '\n') {
+                sse_buffer_.erase(i, 1); // remove \r, keep \n
+            } else {
+                sse_buffer_[i] = '\n'; // bare \r -> \n
+                ++i;
+            }
+        } else {
+            ++i;
+        }
+    }
+
     // Process complete events (separated by double newline)
     size_t pos = 0;
     while ((pos = sse_buffer_.find("\n\n")) != std::string::npos) {

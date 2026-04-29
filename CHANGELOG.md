@@ -1,8 +1,12 @@
-# [v2.0.1] - 2026-04-27
+# [v2.0.1] - 2026-04-29
+
+## Chaged
+- updated SSE endpoint in excamples and tests
 
 ## Fixed
 - WebSocket `co_spawn` completion handler now guards `on_error_()` with a `run_` check, suppressing spurious error callbacks after shutdown.
 - Fixed use-after-free in WebSocket tests where `[&]` lambda captures referenced destroyed stack variables when async callbacks fired via IOCP after the test function returned. Affected tests (`ConnectToEchoServer`, `InvalidHostnameError`, `MultipleErrorCallbacks`, `ReconnectAfterError`, `PlainWebsocket_UrlParsing`) now use `shared_ptr` captures to extend captured variable lifetimes.
+- normalize CRLF in SSE chunk parsing
 
 ## Tests
 - Added 10 comprehensive `Reconnect_*` tests verifying correct behavior when reconnecting by creating a new `Websocket` instance during normal operation (service thread always running):

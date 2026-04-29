@@ -39,7 +39,7 @@ int main()
     // Create HTTP stream connection
     // This example uses a test SSE endpoint that sends time updates
     auto stream = std::make_shared<HttpStream>(
-        "https://sse.dev/test",
+        "https://stream.wikimedia.org/v2/stream/recentchange",
         []() {
             LOG_INFO("Stream connected");
         },

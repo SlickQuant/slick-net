@@ -1,7 +1,7 @@
+#include <slick/logger.hpp>
 #include <slick/net/http.hpp>
 #include <slick/net/logging.hpp>
 #include <nlohmann/json.hpp>
-#include <slick/logger.hpp>
 #include <boost/asio.hpp>
 
 using namespace slick::net;
