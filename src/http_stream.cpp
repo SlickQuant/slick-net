@@ -243,11 +243,20 @@ asio::awaitable<void> HttpStream::do_stream_session_ssl() {
                run_.load(std::memory_order_acquire) &&
                status_.load(std::memory_order_acquire) == Status::CONNECTED)
         {
+            // Short timeout so close() is noticed promptly even if no data arrives
+            beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(2));
+
             // Read some data from the stream
             auto [ec, bytes_transferred] = co_await stream.async_read_some(
                 buffer.prepare(8192),
                 asio::as_tuple(asio::use_awaitable)
             );
+
+            if (ec == beast::error::timeout || ec == asio::error::operation_aborted) {
+                // Timed out waiting for data — check close flag and retry
+                if (should_close_.load(std::memory_order_acquire)) break;
+                continue;
+            }
 
             if (ec == http::error::end_of_stream || ec == asio::error::eof) {
                 // Stream ended gracefully
@@ -363,11 +372,20 @@ asio::awaitable<void> HttpStream::do_stream_session_plain() {
                run_.load(std::memory_order_acquire) &&
                status_.load(std::memory_order_acquire) == Status::CONNECTED)
         {
+            // Short timeout so close() is noticed promptly even if no data arrives
+            stream.expires_after(std::chrono::seconds(2));
+
             // Read some data from the stream
             auto [ec, bytes_transferred] = co_await stream.async_read_some(
                 buffer.prepare(8192),
                 asio::as_tuple(asio::use_awaitable)
             );
+
+            if (ec == beast::error::timeout || ec == asio::error::operation_aborted) {
+                // Timed out waiting for data — check close flag and retry
+                if (should_close_.load(std::memory_order_acquire)) break;
+                continue;
+            }
 
             if (ec == http::error::end_of_stream || ec == asio::error::eof) {
                 // Stream ended gracefully

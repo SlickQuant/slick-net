@@ -1,7 +1,8 @@
 # [v2.0.1] - 2026-04-29
 
 ## Chaged
-- updated SSE endpoint in excamples and tests
+- Updated SSE endpoint in excamples and tests
+- Added timeout handling in HTTP stream sessions
 
 ## Fixed
 - WebSocket `co_spawn` completion handler now guards `on_error_()` with a `run_` check, suppressing spurious error callbacks after shutdown.
