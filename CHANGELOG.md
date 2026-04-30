@@ -1,4 +1,4 @@
-# [v2.0.1] - 2026-04-29
+# [v2.0.1] - 2026-04-30
 
 ## Chaged
 - Updated SSE endpoint in excamples and tests
