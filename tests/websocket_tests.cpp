@@ -84,7 +84,7 @@ TEST_F(WebsocketTest, ConstructorParsesWssUrlWithHostAndPath) {
     std::atomic<bool> error_called{false};
 
     Websocket ws(
-        "wss://echo.websocket.org/test",
+        "wss://ws.postman-echo.com/raw/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
@@ -102,7 +102,7 @@ TEST_F(WebsocketTest, ConstructorParsesWssUrlWithPort) {
     std::atomic<bool> error_called{false};
 
     Websocket ws (
-        "wss://echo.websocket.org/raw:443/test",
+        "wss://ws.postman-echo.com/raw:443/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
@@ -159,7 +159,7 @@ TEST_F(WebsocketTest, ConstructorParsesUrlWithCustomPort) {
     std::atomic<bool> error_called{false};
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org/raw:9001/test",
+        "wss://ws.postman-echo.com/raw:9001/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
@@ -176,7 +176,7 @@ TEST_F(WebsocketTest, StatusTransitions) {
     std::atomic<bool> error_called{false};
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org/test",
+        "wss://ws.postman-echo.com/raw/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
         [&](const char*, std::size_t) { data_called = true; },
@@ -197,7 +197,7 @@ TEST_F(WebsocketTest, CallbacksAreStored) {
     int error_count = 0;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org/test",
+        "wss://ws.postman-echo.com/raw/test",
         [&]() { connected_count++; },
         [&]() { disconnected_count++; },
         [&](const char*, std::size_t) { data_count++; },
@@ -233,7 +233,7 @@ TEST_F(WebsocketTest, ConnectToEchoServer) {
     auto error_message = std::make_shared<std::string>();
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [connected_sync]() { connected_sync->notify(); },
         []() {},
         [](const char*, std::size_t) {},
@@ -266,7 +266,7 @@ TEST_F(WebsocketTest, CloseConnection) {
     EventSynchronizer disconnected_sync;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() { disconnected_sync.notify(); },
         [&](const char*, std::size_t) {},
@@ -325,7 +325,7 @@ TEST_F(WebsocketTest, SendAndReceiveEcho) {
     std::string received_data;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char* data, std::size_t len) {
@@ -361,7 +361,7 @@ TEST_F(WebsocketTest, SendMultipleMessages) {
     std::mutex messages_mutex;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char* data, std::size_t len) {
@@ -401,7 +401,7 @@ TEST_F(WebsocketTest, SendLargeMessage) {
     std::string received_data;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char* data, std::size_t len) {
@@ -439,7 +439,7 @@ TEST_F(WebsocketTest, SendBinaryData) {
     std::vector<char> received_data;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char* data, std::size_t len) {
@@ -462,7 +462,7 @@ TEST_F(WebsocketTest, SendBinaryData) {
 
         data_sync.wait_for(std::chrono::milliseconds(5000));
 
-        // The public test server (echo.websocket.org) is sometimes unreliable with binary data
+        // The public test server (ws.postman-echo.com) is sometimes unreliable with binary data
         // and may close the connection unexpectedly. Only verify if we successfully received data.
         if (!error_sync.is_triggered() && data_sync.is_triggered()) {
             EXPECT_EQ(received_data.size(), binary_data.size());
@@ -489,7 +489,7 @@ TEST_F(WebsocketTest, ConcurrentSends) {
     std::atomic<int> messages_received{0};
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char*, std::size_t) {
@@ -543,7 +543,7 @@ TEST_F(WebsocketTest, MultipleWebsocketInstances) {
 
     for (int i = 0; i < num_websockets; ++i) {
         auto ws = std::make_shared<Websocket>(
-            "wss://echo.websocket.org",
+            "wss://ws.postman-echo.com/raw",
             [&, i]() {
                 connected_syncs[i].notify();
                 total_connected++;
@@ -582,7 +582,7 @@ TEST_F(WebsocketTest, StatusTransitionsOnConnect) {
 
     std::shared_ptr<Websocket> ws;
     ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() {
             {
                 std::lock_guard<std::mutex> lock(status_mutex);
@@ -618,7 +618,7 @@ TEST_F(WebsocketTest, StatusTransitionsOnConnect) {
 
 TEST_F(WebsocketTest, CannotSendWhenDisconnected) {
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() {},
         [&]() {},
         [&](const char*, std::size_t) {},
@@ -636,7 +636,7 @@ TEST_F(WebsocketTest, IsRunningAfterFirstOpen) {
     EventSynchronizer connected_sync;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char*, std::size_t) {},
@@ -717,7 +717,7 @@ TEST_F(WebsocketTest, ReconnectAfterError) {
 
     // Now try connecting to a valid host with a new instance
     auto ws_second = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { second_connected_sync.notify(); },
         [&]() {},
         [&](const char*, std::size_t) {},
@@ -740,7 +740,7 @@ TEST_F(WebsocketTest, EmptyMessageSend) {
     EventSynchronizer data_sync;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char* data, std::size_t len) {
@@ -773,7 +773,7 @@ TEST_F(WebsocketTest, RapidOpenClose) {
     EventSynchronizer error_sync;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() { disconnected_sync.notify(); },
         [&](const char*, std::size_t) {},
@@ -806,7 +806,7 @@ TEST_F(WebsocketTest, DoubleClose) {
     EventSynchronizer connected_sync;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
         [&](const char*, std::size_t) {},
@@ -833,7 +833,7 @@ TEST_F(WebsocketTest, DestructorWhileConnected) {
 
     {
         auto ws = std::make_shared<Websocket>(
-            "wss://echo.websocket.org",
+            "wss://ws.postman-echo.com/raw",
             [&]() { connected_sync.notify(); },
             [&]() {},
             [&](const char*, std::size_t) {},
@@ -907,7 +907,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MessageQueuedAndSentAfterConnect)
     std::atomic<bool> message_sent{false};
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() {
             connected_sync.notify();
         },
@@ -963,7 +963,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MultipleMessages) {
     std::mutex messages_mutex;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() {
             connected_sync.notify();
         },
@@ -1016,7 +1016,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_VerifyOrderPreserved) {
     std::mutex messages_mutex;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() {
             connected_sync.notify();
         },
@@ -1065,7 +1065,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_LargeMessage) {
     std::string received_data;
 
     auto ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() {
             connected_sync.notify();
         },
@@ -1102,7 +1102,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_LargeMessage) {
     ws->close();
 }
 
-// Note: Main tests use wss://echo.websocket.org which is a public echo server maintained by Ably.
+// Note: Main tests use wss://ws.postman-echo.com which is a public test server.
 // Tests may fail if the server is down or network is unavailable.
 //
 // For testing plain WebSocket (ws://) connections locally:
@@ -1143,7 +1143,7 @@ TEST_F(WebsocketTest, Reconnect_NewObject_AfterGracefulClose_Connects) {
     ReceivedMessages received;
 
     auto ws1 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws1_connected.notify(); },
         [&]() { ws1_disconnected.notify(); },
         [&](const char*, std::size_t) {},
@@ -1165,7 +1165,7 @@ TEST_F(WebsocketTest, Reconnect_NewObject_AfterGracefulClose_Connects) {
     ws1.reset();
 
     auto ws2 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws2_connected.notify(); },
         [&]() {},
         [&](const char* d, std::size_t l) { received.add(d, l); },
@@ -1203,7 +1203,7 @@ TEST_F(WebsocketTest, Reconnect_NewObject_MultipleConsecutiveCycles_AllConnect) 
         ReceivedMessages received;
 
         auto ws = std::make_shared<Websocket>(
-            "wss://echo.websocket.org",
+            "wss://ws.postman-echo.com/raw",
             [&]() { connected_sync.notify(); total_connects++; },
             [&]() { disconnected_sync.notify(); total_disconnects++; },
             [&](const char* d, std::size_t l) { received.add(d, l); },
@@ -1254,12 +1254,12 @@ TEST_F(WebsocketTest, Reconnect_NewObject_FromWithinDisconnectCallback_Connects)
     auto ws2_holder = std::make_shared<std::shared_ptr<Websocket>>();
 
     auto ws1 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [ws1_connected]() { ws1_connected->notify(); },
         [ws2_holder, ws2_connected]() {
             // Running on the service thread. Must not block.
             *ws2_holder = std::make_shared<Websocket>(
-                "wss://echo.websocket.org",
+                "wss://ws.postman-echo.com/raw",
                 [ws2_connected]() { ws2_connected->notify(); },
                 []() {},
                 [](const char*, std::size_t) {},
@@ -1309,7 +1309,7 @@ TEST_F(WebsocketTest, Reconnect_NewObject_FromWithinErrorCallback_Connects) {
             if (error_fired->exchange(true)) return; // only first error
             // Running on the service thread. Must not block.
             *ws2 = std::make_shared<Websocket>(
-                "wss://echo.websocket.org",
+                "wss://ws.postman-echo.com/raw",
                 [ws2_connected]() { ws2_connected->notify(); },
                 []() {},
                 [](const char*, std::size_t) {},
@@ -1341,7 +1341,7 @@ TEST_F(WebsocketTest, Reconnect_NewObject_AfterDisconnectInDataCallback_Connects
     std::shared_ptr<Websocket> ws1;
 
     ws1 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws1_connected.notify(); },
         [&]() { ws1_disconnected.notify(); },
         [&](const char*, std::size_t) {
@@ -1368,7 +1368,7 @@ TEST_F(WebsocketTest, Reconnect_NewObject_AfterDisconnectInDataCallback_Connects
     ASSERT_TRUE(disc) << "ws1 did not reach DISCONNECTED after close-in-data-callback";
 
     auto ws2 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws2_connected.notify(); },
         [&]() {},
         [&](const char* d, std::size_t l) { ws2_received.add(d, l); },
@@ -1401,7 +1401,7 @@ TEST_F(WebsocketTest, Reconnect_NewObject_AfterServerSideClose_Connects) {
     std::shared_ptr<Websocket> ws1;
 
     ws1 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() {
             ws1_connected.notify();
             // Immediately close to simulate server-side close
@@ -1423,7 +1423,7 @@ TEST_F(WebsocketTest, Reconnect_NewObject_AfterServerSideClose_Connects) {
     ASSERT_TRUE(disc) << "ws1 did not reach DISCONNECTED";
 
     auto ws2 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws2_connected.notify(); },
         [&]() {},
         [&](const char* d, std::size_t l) { received.add(d, l); },
@@ -1455,7 +1455,7 @@ TEST_F(WebsocketTest, Reconnect_DataIntegrity_NoBleedBetweenSessions) {
     ReceivedMessages ws1_received;
 
     auto ws1 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws1_connected.notify(); },
         [&]() {},
         [&](const char* d, std::size_t l) { ws1_received.add(d, l); },
@@ -1485,7 +1485,7 @@ TEST_F(WebsocketTest, Reconnect_DataIntegrity_NoBleedBetweenSessions) {
     ReceivedMessages ws2_received;
 
     auto ws2 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws2_connected.notify(); },
         [&]() {},
         [&](const char* d, std::size_t l) { ws2_received.add(d, l); },
@@ -1523,7 +1523,7 @@ TEST_F(WebsocketTest, Reconnect_RapidSuccessiveCycles_ServiceThreadRemainsFuncti
     std::shared_ptr<Websocket> ws;
 
     ws = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { first_connected.notify(); },
         [&]() {},
         [&](const char*, std::size_t) {},
@@ -1540,7 +1540,7 @@ TEST_F(WebsocketTest, Reconnect_RapidSuccessiveCycles_ServiceThreadRemainsFuncti
     for (int i = 0; i < 5; ++i) {
         ws.reset();
         ws = std::make_shared<Websocket>(
-            "wss://echo.websocket.org",
+            "wss://ws.postman-echo.com/raw",
             [&]() {},
             [&]() {},
             [&](const char*, std::size_t) {},
@@ -1570,7 +1570,7 @@ TEST_F(WebsocketTest, Reconnect_RapidSuccessiveCycles_ServiceThreadRemainsFuncti
 
         EventSynchronizer final_connected;
         auto final_ws = std::make_shared<Websocket>(
-            "wss://echo.websocket.org",
+            "wss://ws.postman-echo.com/raw",
             [&]() { final_connected.notify(); },
             [&]() {},
             data_notifier,
@@ -1608,7 +1608,7 @@ TEST_F(WebsocketTest, Reconnect_CallbacksFireInCorrectOrder_AcrossMultipleSessio
         ReceivedMessages received;
 
         auto ws = std::make_shared<Websocket>(
-            "wss://echo.websocket.org",
+            "wss://ws.postman-echo.com/raw",
             [&, session]() { log("connected", session); connected_sync.notify(); },
             [&, session]() { log("disconnected", session); disconnected_sync.notify(); },
             [&, session](const char* d, std::size_t l) {
@@ -1671,7 +1671,7 @@ TEST_F(WebsocketTest, Reconnect_ConcurrentNewObjects_BothConnect) {
     ReceivedMessages ws1_received, ws2_received;
 
     auto ws1 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws1_connected.notify(); },
         [&]() {},
         [&](const char* d, std::size_t l) { ws1_received.add(d, l); },
@@ -1679,7 +1679,7 @@ TEST_F(WebsocketTest, Reconnect_ConcurrentNewObjects_BothConnect) {
     );
 
     auto ws2 = std::make_shared<Websocket>(
-        "wss://echo.websocket.org",
+        "wss://ws.postman-echo.com/raw",
         [&]() { ws2_connected.notify(); },
         [&]() {},
         [&](const char* d, std::size_t l) { ws2_received.add(d, l); },
