@@ -1,4 +1,7 @@
-# [v2.0.2] - 2026-05-03
+# [v2.0.2] - 2026-05-04
+
+## Added
+- Added reason in Http::Response
 
 ## Fixed
 - HTTP response body is now always returned in `result_text` regardless of status code. Previously, non-2xx responses (e.g. 400 Bad Request) set `result_text` to the HTTP reason phrase instead of the response body, discarding any JSON error payload sent by the server.

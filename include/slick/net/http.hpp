@@ -23,6 +23,7 @@ class Http {
 public:
     struct Response {
         uint32_t result_code = 0;
+        std::string reason;
         std::string result_text;
 
         bool is_ok() const noexcept {

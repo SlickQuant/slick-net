@@ -100,6 +100,7 @@ namespace {
         Http::Response response;
         response.result_code = static_cast<uint32_t>(res.result_int());
         response.result_text = beast::buffers_to_string(res.body().data());
+        response.reason = std::string(res.reason());
 
         // Set the timeout.
         stream.expires_after(std::chrono::seconds(30));
