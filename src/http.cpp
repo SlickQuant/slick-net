@@ -98,15 +98,8 @@ namespace {
         co_await http::async_read(stream, buffer, res);
 
         Http::Response response;
-        if (res.result() == http::status::ok ||
-            (res.result_int() >= 200 && res.result_int() < 300)) {
-            response.result_code = static_cast<uint32_t>(res.result_int());
-            response.result_text = beast::buffers_to_string(res.body().data());
-        }
-        else {
-            response.result_code = static_cast<uint32_t>(res.result_int());
-            response.result_text = std::string(res.reason());
-        }
+        response.result_code = static_cast<uint32_t>(res.result_int());
+        response.result_text = beast::buffers_to_string(res.body().data());
 
         // Set the timeout.
         stream.expires_after(std::chrono::seconds(30));
@@ -193,15 +186,8 @@ namespace {
         co_await http::async_read(stream, buffer, res);
 
         Http::Response response;
-        if (res.result() == http::status::ok ||
-            (res.result_int() >= 200 && res.result_int() < 300)) {
-            response.result_code = static_cast<uint32_t>(res.result_int());
-            response.result_text = beast::buffers_to_string(res.body().data());
-        }
-        else {
-            response.result_code = static_cast<uint32_t>(res.result_int());
-            response.result_text = std::string(res.reason());
-        }
+        response.result_code = static_cast<uint32_t>(res.result_int());
+        response.result_text = beast::buffers_to_string(res.body().data());
 
         // Set the timeout.
         beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(30));

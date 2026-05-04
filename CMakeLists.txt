@@ -8,7 +8,7 @@ if (MSVC)
 endif()
 
 project(slick-net
-    VERSION 2.0.1
+    VERSION 2.0.2
     LANGUAGES CXX
 )
 

@@ -1,3 +1,8 @@
+# [v2.0.2] - 2026-05-03
+
+## Fixed
+- HTTP response body is now always returned in `result_text` regardless of status code. Previously, non-2xx responses (e.g. 400 Bad Request) set `result_text` to the HTTP reason phrase instead of the response body, discarding any JSON error payload sent by the server.
+
 # [v2.0.1] - 2026-04-30
 
 ## Chaged
