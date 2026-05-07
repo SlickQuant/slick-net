@@ -1,3 +1,11 @@
+# [v2.0.3] - 2026-05-07
+
+## Added
+- `Websocket::reset_callbacks()` — public API to silence all callbacks (sets each to a no-op), useful when the caller wants to tear down a `Websocket` without receiving further events.
+
+## Fixed
+- `Websocket` destructor now explicitly calls `reset_callbacks()` followed by `close()` instead of defaulting, preventing spurious callbacks from firing into already-destroyed caller state during object destruction.
+
 # [v2.0.2] - 2026-05-04
 
 ## Added

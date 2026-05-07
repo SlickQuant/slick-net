@@ -43,6 +43,8 @@ public:
 
     static bool is_running() noexcept;
 
+    void reset_callbacks();
+
 private:
     struct Impl;
     std::shared_ptr<Impl> impl_;

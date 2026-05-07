@@ -218,7 +218,13 @@ Websocket::Websocket(
         std::move(onDataCallback),
         std::move(onErrorCallback))) {}
 
-Websocket::~Websocket() = default;
+Websocket::~Websocket() {
+    if (impl_) {
+        // Ensure the WebSocket connection is closed gracefully.
+        impl_->reset_callbacks(); // Prevent callbacks from being called during destruction.
+        impl_->close();
+    }
+}
 Websocket::Websocket(Websocket&&) noexcept = default;
 Websocket& Websocket::operator=(Websocket&&) noexcept = default;
 
@@ -255,6 +261,10 @@ void Websocket::shutdown() {
             detail::service_thread_.join();
         }
     }
+}
+
+void Websocket::reset_callbacks() {
+    impl_->reset_callbacks();
 }
 
 } // namespace slick::net

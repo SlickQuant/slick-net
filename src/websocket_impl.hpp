@@ -70,6 +70,13 @@ struct Websocket::Impl : public std::enable_shared_from_this<Websocket::Impl> {
         return status_.load(std::memory_order_relaxed);
     }
 
+    void reset_callbacks() {
+        on_connected_ = [](){};
+        on_diconnected_ = [](){};
+        on_data_ = [](const char*, std::size_t){};
+        on_error_ = [](std::string&&){};
+    }
+
 private:
     asio::awaitable<void> do_ws_session();
     asio::awaitable<void> do_ws_session_ssl();
