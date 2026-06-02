@@ -41,24 +41,40 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    env:
+      VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+
     steps:
     - uses: actions/checkout@v4
 
+    - name: Cache vcpkg
+      id: vcpkg-cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ github.workspace }}/vcpkg
+          !${{ github.workspace }}/vcpkg/buildtrees
+          !${{ github.workspace }}/vcpkg/packages
+          !${{ github.workspace }}/vcpkg/downloads
+        key: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-2025.12.12-${{ hashFiles('.github/workflows/ci.yml') }}
+        restore-keys: vcpkg-${{ runner.os }}-${{ matrix.triplet }}-2025.12.12-
+
     - name: Setup vcpkg (using git clone)
+      if: steps.vcpkg-cache.outputs.cache-hit != 'true'
       run: |
         git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
         cd ${{ github.workspace }}/vcpkg
         git checkout 2025.12.12
 
     - name: Bootstrap vcpkg (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
       run: |
         cd ${{ github.workspace }}/vcpkg
         .\bootstrap-vcpkg.bat
       shell: pwsh
 
     - name: Bootstrap vcpkg (Linux/macOS)
-      if: runner.os != 'Windows'
+      if: runner.os != 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
       run: |
         cd ${{ github.workspace }}/vcpkg
         ./bootstrap-vcpkg.sh
@@ -75,8 +91,8 @@ jobs:
         g++ --version
 
     - name: Install vcpkg dependencies
+      if: steps.vcpkg-cache.outputs.cache-hit != 'true'
       env:
-        VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
         VCPKG_DEFAULT_TRIPLET: ${{ matrix.triplet }}
       run: |
         ${{ github.workspace }}/vcpkg/vcpkg install boost-asio boost-beast boost-context boost-system openssl nlohmann-json gtest
