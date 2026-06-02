@@ -1,14 +1,21 @@
 cmake_minimum_required(VERSION 3.20)
 
-if (MSVC)
-    option(LINK_STATICALLY "Build tests" OFF)
-    if (LINK_STATICALLY)
+option(LINK_STATICALLY "Link statically" OFF)
+if (LINK_STATICALLY)
+    if (MSVC)
         set(VCPKG_TARGET_TRIPLET x64-windows-static)
+    elseif (APPLE)
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|ARM64")
+            set(VCPKG_TARGET_TRIPLET arm64-osx-static)
+        else()
+            set(VCPKG_TARGET_TRIPLET x64-osx-static)
+        endif()
     endif()
+    # Linux x64-linux is already static by default
 endif()
 
 project(slick-net
-    VERSION 2.0.3
+    VERSION 2.0.4
     LANGUAGES CXX
 )
 
@@ -18,7 +25,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if (LINK_STATICALLY)
     set(Boost_USE_STATIC_LIBS ON)
     set(OPENSSL_USE_STATIC_LIBS TRUE)
-    set(OPENSSL_MSVC_STATIC_RT TRUE)
+    if (MSVC)
+        set(OPENSSL_MSVC_STATIC_RT TRUE)
+    endif()
 endif()
 find_package(Boost CONFIG REQUIRED COMPONENTS beast context)
 find_package(OpenSSL CONFIG REQUIRED)
@@ -78,7 +87,11 @@ if (MSVC)
         set_target_properties(slick-net PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 else()
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
+    if(CMAKE_CROSSCOMPILING)
+        set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+    else()
+        set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
+    endif()
 endif()
 
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)

@@ -1,3 +1,13 @@
+# [v2.0.4] - 2026-06-02
+
+## Changed
+- `LINK_STATICALLY` cmake option is now available on all platforms, not just MSVC.
+  - Windows: sets `VCPKG_TARGET_TRIPLET` to `x64-windows-static`.
+  - macOS: sets `VCPKG_TARGET_TRIPLET` to `arm64-osx-static` or `x64-osx-static` based on architecture.
+  - Linux: no triplet change needed — `x64-linux` is already static by default.
+- `OPENSSL_MSVC_STATIC_RT` is now only set on MSVC (was incorrectly set on all platforms when `LINK_STATICALLY` was on).
+- Non-MSVC release builds skip `-march=native` when cross-compiling.
+
 # [v2.0.3] - 2026-05-07
 
 ## Added
