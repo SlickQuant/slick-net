@@ -238,6 +238,18 @@ asio::awaitable<void> HttpStream::do_stream_session_ssl() {
             is_sse = true;
         }
 
+        // async_read_header may have read body bytes past the headers into buffer.
+        // Deliver them now so they are not lost if the first async_read_some times out.
+        if (buffer.size() > 0) {
+            auto pre = beast::buffers_to_string(buffer.data());
+            buffer.consume(buffer.size());
+            if (is_sse) {
+                parse_sse_chunk(pre.data(), pre.size());
+            } else {
+                on_data_(pre.data(), pre.size());
+            }
+        }
+
         // Read body chunks continuously
         while (!should_close_.load(std::memory_order_acquire) &&
                run_.load(std::memory_order_acquire) &&
@@ -365,6 +377,18 @@ asio::awaitable<void> HttpStream::do_stream_session_plain() {
         auto content_type = res[http::field::content_type];
         if (content_type.find("text/event-stream") != std::string::npos) {
             is_sse = true;
+        }
+
+        // async_read_header may have read body bytes past the headers into buffer.
+        // Deliver them now so they are not lost if the first async_read_some times out.
+        if (buffer.size() > 0) {
+            auto pre = beast::buffers_to_string(buffer.data());
+            buffer.consume(buffer.size());
+            if (is_sse) {
+                parse_sse_chunk(pre.data(), pre.size());
+            } else {
+                on_data_(pre.data(), pre.size());
+            }
         }
 
         // Read body chunks continuously
