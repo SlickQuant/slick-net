@@ -555,9 +555,9 @@ TEST_F(HttpTest, HttpStream_BasicConnection) {
     EXPECT_TRUE(wait_for_condition([&]() { return connected.load(); },
                                     std::chrono::seconds(10)));
 
-    // Wait for at least one data event
+    // Wait for at least one data event (30s: macOS CI runners are slower to receive the first SSE chunk)
     EXPECT_TRUE(wait_for_condition([&]() { return data_received_count.load() > 0; },
-                                    std::chrono::seconds(10)));
+                                    std::chrono::seconds(30)));
 
     // Close the stream
     stream->close();
