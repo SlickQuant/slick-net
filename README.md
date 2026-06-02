@@ -31,6 +31,49 @@ A high-performance C++ HTTP/WebSocket client library built on Boost.Beast with f
 
 ## Installation
 
+### Dependencies via vcpkg
+
+Install [vcpkg](https://github.com/microsoft/vcpkg) and bootstrap it:
+
+```bash
+git clone https://github.com/Microsoft/vcpkg.git
+cd vcpkg
+./bootstrap-vcpkg.sh   # Linux/macOS
+.\bootstrap-vcpkg.bat  # Windows
+```
+
+Install the required packages (select the triplet that matches your platform):
+
+| Platform | Default triplet | Static triplet |
+|---|---|---|
+| Windows x64 | `x64-windows` | `x64-windows-static` |
+| Linux x64 | `x64-linux` | *(already static)* |
+| Linux arm64 | `arm64-linux` | *(already static)* |
+| macOS x64 | `x64-osx` | `x64-osx-static` |
+| macOS arm64 | `arm64-osx` | `arm64-osx-static` |
+
+```bash
+vcpkg install boost-asio boost-beast boost-context boost-system openssl --triplet <triplet>
+```
+
+Then pass the vcpkg toolchain file to CMake:
+
+```bash
+cmake -B build \
+  -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake \
+  -DVCPKG_TARGET_TRIPLET=<triplet>
+```
+
+#### Static linking
+
+Pass `-DLINK_STATICALLY=ON` to CMake — it sets the correct static vcpkg triplet automatically and enables static Boost/OpenSSL linkage:
+
+```bash
+cmake -B build \
+  -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake \
+  -DLINK_STATICALLY=ON
+```
+
 ### CMake Integration
 
 Add slick-net as a subdirectory in your CMake project:
