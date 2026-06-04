@@ -333,7 +333,7 @@ Websocket(
 ```
 
 **Methods:**
-- `void open()` - Start the WebSocket connection
+- `void open()` - Start or restart the WebSocket connection (see [Reconnect](#reconnect) below)
 - `void close()` - Close the WebSocket connection
 - `void send(const char* buffer, size_t len)` - Send data through the WebSocket
 - `Status status() const` - Get current connection status
@@ -344,6 +344,39 @@ Websocket(
 - `CONNECTED` - Connected and ready
 - `DISCONNECTING` - Disconnection in progress
 - `DISCONNECTED` - Disconnected
+
+### Reconnect
+
+The same `Websocket` object can be reused — call `open()` again after the connection closes to reconnect without creating a new instance.
+
+```cpp
+ws.close();
+
+// Wait for the previous session to fully close
+while (ws.status() != Websocket::Status::DISCONNECTED) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+
+ws.open(); // reconnects using the same URL and callbacks
+```
+
+`open()` is also safe to call from within any callback (`onConnected`, `onDisconnected`, `onData`, `onError`) because the new connection is posted asynchronously and does not block the service thread.
+
+#### Rapid reconnect and the DISCONNECTING edge case
+
+If `open()` is called while the previous session is still in the `DISCONNECTING` state (i.e. before `close()` has fully completed), the library lets the old close finish in the background but **suppresses `onDisconnected` for that session** — the callback is replaced with a no-op so only the new session's events reach the caller.
+
+```
+Normal reconnect (wait for DISCONNECTED):
+  open → connected → close → disconnected ← fires
+                                           → open → connected → ...
+
+Rapid reconnect (call open() while DISCONNECTING):
+  open → connected → close → [disconnected suppressed]
+                           → open → connected → ...
+```
+
+If you need a guaranteed `onDisconnected` for every session — for example, to flush per-session state — wait for `status() == DISCONNECTED` before calling `open()` again.
 
 ### HttpStream Class
 

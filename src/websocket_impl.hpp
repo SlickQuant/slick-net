@@ -55,10 +55,10 @@ namespace slick::net {
 struct Websocket::Impl : public std::enable_shared_from_this<Websocket::Impl> {
     explicit Impl(
         std::string url,
-        std::function<void()> &&onConnectedCallback,
-        std::function<void()> &&onDisconnectedCallback,
-        std::function<void(const char*, std::size_t)> &&onDataCallback,
-        std::function<void(std::string &&err)> &&onErrorCallback);
+        std::function<void()> onConnectedCallback,
+        std::function<void()> onDisconnectedCallback,
+        std::function<void(const char*, std::size_t)> onDataCallback,
+        std::function<void(std::string &&err)> onErrorCallback);
 
     void open();
     bool close();

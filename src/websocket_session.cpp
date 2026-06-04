@@ -4,10 +4,10 @@ namespace slick::net {
 
 Websocket::Impl::Impl(
     std::string url,
-    std::function<void()> &&onConnectedCallback,
-    std::function<void()> &&onDisconnectedCallback,
-    std::function<void(const char*, std::size_t)> &&onDataCallback,
-    std::function<void(std::string &&err)> &&onErrorCallback)
+    std::function<void()> onConnectedCallback,
+    std::function<void()> onDisconnectedCallback,
+    std::function<void(const char*, std::size_t)> onDataCallback,
+    std::function<void(std::string &&err)> onErrorCallback)
     : url_(std::move(url))
     , on_connected_(std::move(onConnectedCallback))
     , on_diconnected_(std::move(onDisconnectedCallback))

@@ -211,12 +211,12 @@ Websocket::Websocket(
     std::function<void()> &&onDiconnectedCallback,
     std::function<void(const char*, std::size_t)> &&onDataCallback,
     std::function<void(std::string &&err)> &&onErrorCallback)
-    : impl_(std::make_shared<Impl>(
-        std::move(url),
-        std::move(onConnectedCallback),
-        std::move(onDiconnectedCallback),
-        std::move(onDataCallback),
-        std::move(onErrorCallback))) {}
+    : url_(std::move(url)),
+      on_connected_(std::move(onConnectedCallback)),
+      on_diconnected_(std::move(onDiconnectedCallback)),
+      on_data_(std::move(onDataCallback)),
+      on_error_(std::move(onErrorCallback))
+    {}
 
 Websocket::~Websocket() {
     if (impl_) {
@@ -229,23 +229,50 @@ Websocket::Websocket(Websocket&&) noexcept = default;
 Websocket& Websocket::operator=(Websocket&&) noexcept = default;
 
 void Websocket::open() {
+    if (impl_) {
+        if (impl_->status() == Status::CONNECTED) {
+            LOG_INFO("WebSocket {} already connected", url_);
+            return;
+        }
+        else if (impl_->status() == Status::CONNECTING) {
+            LOG_INFO("WebSocket {} is connecting", url_);
+            return;
+        }
+        impl_->reset_callbacks();
+        impl_->close();
+    }
+    impl_ = std::make_shared<Impl>(url_, on_connected_, on_diconnected_, on_data_, on_error_);
     impl_->open();
 }
 
 bool Websocket::close() {
-    return impl_->close();
+    if (impl_) {
+        return impl_->close();
+    }
+    return true;
 }
 
 void Websocket::send(const char* buffer, std::size_t len, bool is_binary) {
-    impl_->send(buffer, len, is_binary);
+    if (impl_) {
+        impl_->send(buffer, len, is_binary);
+    } else {
+        LOG_WARN("WebSocket not initialized, cannot send data.");
+    }
 }
 
 void Websocket::send_binary_data(const char* buffer, std::size_t len) {
-    impl_->send_binary_data(buffer, len);
+    if (impl_) {
+        impl_->send_binary_data(buffer, len);
+    } else {
+        LOG_WARN("WebSocket not initialized, cannot send binary data.");
+    }
 }
 
 Websocket::Status Websocket::status() const noexcept {
-    return impl_->status();
+    if (impl_) {
+        return impl_->status();
+    }
+    return Status::DISCONNECTED;
 }
 
 bool Websocket::is_running() noexcept {
@@ -264,7 +291,9 @@ void Websocket::shutdown() {
 }
 
 void Websocket::reset_callbacks() {
-    impl_->reset_callbacks();
+    if (impl_) {
+        impl_->reset_callbacks();
+    }
 }
 
 } // namespace slick::net

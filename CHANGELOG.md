@@ -1,12 +1,37 @@
-# [v2.0.4] - 2026-06-02
+# [v2.1.0] - 2026-06-04
+
+## Added
+- **Same-object WebSocket reconnect**: `Websocket::open()` can now be called again on the same object after a disconnect, without creating a new instance. Each call to `open()` on a DISCONNECTED websocket creates a fresh internal session (new TCP stream, SSL context, read/write buffers) while reusing the original URL and callbacks.
+  - Safe to call from within any callback (`onConnected`, `onDisconnected`, `onData`, `onError`) — the new connection is posted asynchronously and does not block the service thread.
+  - If called while the previous session is still DISCONNECTING (rapid reconnect), the outgoing close completes in the background but its `onDisconnected` callback is suppressed, so only the new session's events reach the caller.
 
 ## Changed
+- `Websocket` constructor defers `Impl` creation to `open()`. URL and callbacks are now stored on the outer `Websocket` object so they survive across reconnect cycles.
+- `Websocket::Impl` constructor parameters changed from rvalue references to by-value to support passing copies of stored callbacks on each `open()`.
+- All `Websocket` public methods (`close()`, `send()`, `send_binary_data()`, `status()`, `reset_callbacks()`) now guard against a null `impl_` (the state before the first `open()` call). `send()` before `open()` logs a warning and drops the message instead of crashing.
+- Several tests that unnecessarily heap-allocated `Websocket` via `make_shared` simplified to stack-allocated instances.
 - `LINK_STATICALLY` cmake option is now available on all platforms, not just MSVC.
   - Windows: sets `VCPKG_TARGET_TRIPLET` to `x64-windows-static`.
   - macOS: sets `VCPKG_TARGET_TRIPLET` to `arm64-osx-static` or `x64-osx-static` based on architecture.
   - Linux: no triplet change needed — `x64-linux` is already static by default.
 - `OPENSSL_MSVC_STATIC_RT` is now only set on MSVC (was incorrectly set on all platforms when `LINK_STATICALLY` was on).
 - Non-MSVC release builds skip `-march=native` when cross-compiling.
+
+## Tests
+- Added 9 same-object reconnect tests, each pairing an existing new-object test:
+  - `Reconnect_AfterGracefulClose_Connects` — basic reconnect after clean close
+  - `Reconnect_MultipleConsecutiveCycles_AllConnect` — 3 reconnect cycles with echo verification
+  - `Reconnect_FromWithinDisconnectCallback_Connects` — reconnect from inside `onDisconnected`
+  - `Reconnect_FromWithinErrorCallback_Connects` — reconnect from inside `onError`
+  - `Reconnect_AfterDisconnectInDataCallback_Connects` — reconnect after `close()` called from `onData`
+  - `Reconnect_AfterServerSideClose_Connects` — reconnect after `close()` called from `onConnected`
+  - `Reconnect_SameObject_DataIntegrity_NoBleedBetweenSessions` — no stale data across sessions
+  - `Reconnect_SameObject_RapidSuccessiveCycles_ServiceThreadRemainsFunctional` — 5 rapid close/open cycles, write pipeline verified on final session
+  - `Reconnect_SameObject_CallbacksFireInCorrectOrder` — `connected → data → disconnected` ordering verified across 3 sessions
+
+## Documentation
+- `open()` declaration in `websocket.hpp` annotated with reconnect semantics, the DISCONNECTING suppression behavior, and callback-safety guarantee.
+- README: new [Reconnect](#reconnect) section under the Websocket API with a code example and an ASCII diagram illustrating when `onDisconnected` fires versus is suppressed in the rapid-reconnect edge case.
 
 # [v2.0.3] - 2026-05-07
 

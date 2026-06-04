@@ -158,7 +158,7 @@ TEST_F(WebsocketTest, ConstructorParsesUrlWithCustomPort) {
     std::atomic<bool> data_called{false};
     std::atomic<bool> error_called{false};
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw:9001/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
@@ -166,7 +166,7 @@ TEST_F(WebsocketTest, ConstructorParsesUrlWithCustomPort) {
         [&](std::string&&) { error_called = true; }
     );
 
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 }
 
 TEST_F(WebsocketTest, StatusTransitions) {
@@ -175,7 +175,7 @@ TEST_F(WebsocketTest, StatusTransitions) {
     std::atomic<bool> data_called{false};
     std::atomic<bool> error_called{false};
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw/test",
         [&]() { connected_called = true; },
         [&]() { disconnected_called = true; },
@@ -184,7 +184,7 @@ TEST_F(WebsocketTest, StatusTransitions) {
     );
 
     // Initial state should be DISCONNECTED
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 
     // Note: We can't easily test CONNECTING/CONNECTED states without mocking
     // the network layer, but we can verify the initial state
@@ -196,7 +196,7 @@ TEST_F(WebsocketTest, CallbacksAreStored) {
     int data_count = 0;
     int error_count = 0;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw/test",
         [&]() { connected_count++; },
         [&]() { disconnected_count++; },
@@ -206,7 +206,7 @@ TEST_F(WebsocketTest, CallbacksAreStored) {
 
     // We can't directly invoke the callbacks since they're private,
     // but we can verify the websocket is created successfully
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
     EXPECT_EQ(connected_count, 0);
     EXPECT_EQ(disconnected_count, 0);
     EXPECT_EQ(data_count, 0);
@@ -232,7 +232,7 @@ TEST_F(WebsocketTest, ConnectToEchoServer) {
     auto error_sync = std::make_shared<EventSynchronizer>();
     auto error_message = std::make_shared<std::string>();
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [connected_sync]() { connected_sync->notify(); },
         []() {},
@@ -243,9 +243,9 @@ TEST_F(WebsocketTest, ConnectToEchoServer) {
         }
     );
 
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 
-    ws->open();
+    ws.open();
 
     // Wait for connection or error
     connected_sync->wait_for(std::chrono::milliseconds(10000));
@@ -254,18 +254,18 @@ TEST_F(WebsocketTest, ConnectToEchoServer) {
     EXPECT_TRUE(connected_sync->is_triggered() || error_sync->is_triggered());
 
     if (connected_sync->is_triggered()) {
-        EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+        EXPECT_EQ(ws.status(), Websocket::Status::CONNECTED);
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, CloseConnection) {
     EventSynchronizer connected_sync;
     EventSynchronizer disconnected_sync;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() { disconnected_sync.notify(); },
@@ -273,20 +273,20 @@ TEST_F(WebsocketTest, CloseConnection) {
         [&](std::string&&) {}
     );
 
-    ws->open();
+    ws.open();
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     if (connected_sync.is_triggered()) {
-        ws->close();
+        ws.close();
 
         disconnected_sync.wait_for(std::chrono::milliseconds(1000));
 
         // Verify status changes to DISCONNECTING
-        EXPECT_TRUE(ws->status() == Websocket::Status::DISCONNECTING ||
-                   ws->status() == Websocket::Status::DISCONNECTED);
+        EXPECT_TRUE(ws.status() == Websocket::Status::DISCONNECTING ||
+                   ws.status() == Websocket::Status::DISCONNECTED);
     } else {
         // Always close the websocket even if connection failed
-        ws->close();
+        ws.close();
     }
 }
 
@@ -295,7 +295,7 @@ TEST_F(WebsocketTest, InvalidHostnameError) {
     auto error_sync = std::make_shared<EventSynchronizer>();
     auto error_message = std::make_shared<std::string>();
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://invalid-hostname-that-does-not-exist-12345.com",
         []() {},
         []() {},
@@ -306,15 +306,15 @@ TEST_F(WebsocketTest, InvalidHostnameError) {
         }
     );
 
-    ws->open();
-    EXPECT_TRUE(ws->status() == Websocket::Status::CONNECTING);
+    ws.open();
+    EXPECT_TRUE(ws.status() == Websocket::Status::CONNECTING);
     error_sync->wait_for(std::chrono::milliseconds(5000));
 
     EXPECT_TRUE(error_sync->is_triggered());
     EXPECT_FALSE(error_message->empty());
 
     // Close the websocket to clean up
-    ws->close();
+    ws.close();
 }
 
 // ======================== Message Send/Receive Tests ========================
@@ -324,7 +324,7 @@ TEST_F(WebsocketTest, SendAndReceiveEcho) {
     EventSynchronizer data_sync;
     std::string received_data;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
@@ -335,13 +335,13 @@ TEST_F(WebsocketTest, SendAndReceiveEcho) {
         [&](std::string&&) {}
     );
 
-    ws->open();
+    ws.open();
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     EXPECT_TRUE(connected_sync.is_triggered());
     if (connected_sync.is_triggered()) {
         const char* test_message = "Hello WebSocket!";
-        ws->send(test_message, strlen(test_message));
+        ws.send(test_message, strlen(test_message));
 
         data_sync.wait_for(std::chrono::milliseconds(5000));
 
@@ -351,7 +351,7 @@ TEST_F(WebsocketTest, SendAndReceiveEcho) {
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, SendMultipleMessages) {
@@ -360,7 +360,7 @@ TEST_F(WebsocketTest, SendMultipleMessages) {
     std::vector<std::string> received_messages;
     std::mutex messages_mutex;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
@@ -372,7 +372,7 @@ TEST_F(WebsocketTest, SendMultipleMessages) {
         [&](std::string&&) {}
     );
 
-    ws->open();
+    ws.open();
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     EXPECT_TRUE(connected_sync.is_triggered());
@@ -380,7 +380,7 @@ TEST_F(WebsocketTest, SendMultipleMessages) {
         const int num_messages = 5;
         for (int i = 0; i < num_messages; ++i) {
             std::string msg = "Message " + std::to_string(i);
-            ws->send(msg.c_str(), msg.size());
+            ws.send(msg.c_str(), msg.size());
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
@@ -392,7 +392,7 @@ TEST_F(WebsocketTest, SendMultipleMessages) {
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, SendLargeMessage) {
@@ -400,7 +400,7 @@ TEST_F(WebsocketTest, SendLargeMessage) {
     EventSynchronizer data_sync;
     std::string received_data;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
@@ -411,14 +411,14 @@ TEST_F(WebsocketTest, SendLargeMessage) {
         [&](std::string&&) {}
     );
 
-    ws->open();
+    ws.open();
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     EXPECT_TRUE(connected_sync.is_triggered());
     if (connected_sync.is_triggered()) {
         // Create a large message (10KB)
         std::string large_message(10240, 'A');
-        ws->send(large_message.c_str(), large_message.size());
+        ws.send(large_message.c_str(), large_message.size());
 
         data_sync.wait_for(std::chrono::milliseconds(5000));
 
@@ -429,7 +429,7 @@ TEST_F(WebsocketTest, SendLargeMessage) {
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, SendBinaryData) {
@@ -438,7 +438,7 @@ TEST_F(WebsocketTest, SendBinaryData) {
     EventSynchronizer error_sync;
     std::vector<char> received_data;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
@@ -452,13 +452,13 @@ TEST_F(WebsocketTest, SendBinaryData) {
         }
     );
 
-    ws->open();
+    ws.open();
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     if (connected_sync.is_triggered() && !error_sync.is_triggered()) {
         // Binary data with null bytes
         std::vector<char> binary_data = {'\x01', '\x02', '\x03', static_cast<char>(0xFF), static_cast<char>(0xFE), '\x42'};
-        ws->send(binary_data.data(), binary_data.size(), true);
+        ws.send(binary_data.data(), binary_data.size(), true);
 
         data_sync.wait_for(std::chrono::milliseconds(5000));
 
@@ -478,7 +478,7 @@ TEST_F(WebsocketTest, SendBinaryData) {
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 // ======================== Concurrent Operations Tests ========================
@@ -488,7 +488,7 @@ TEST_F(WebsocketTest, ConcurrentSends) {
     std::atomic<int> messages_sent{0};
     std::atomic<int> messages_received{0};
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
@@ -498,7 +498,7 @@ TEST_F(WebsocketTest, ConcurrentSends) {
         [&](std::string&&) {}
     );
 
-    ws->open();
+    ws.open();
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     EXPECT_TRUE(connected_sync.is_triggered());
@@ -511,7 +511,7 @@ TEST_F(WebsocketTest, ConcurrentSends) {
             threads.emplace_back([&, t]() {
                 for (int i = 0; i < messages_per_thread; ++i) {
                     std::string msg = "Thread-" + std::to_string(t) + "-Msg-" + std::to_string(i);
-                    ws->send(msg.c_str(), msg.size());
+                    ws.send(msg.c_str(), msg.size());
                     messages_sent++;
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
@@ -532,7 +532,7 @@ TEST_F(WebsocketTest, ConcurrentSends) {
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, MultipleWebsocketInstances) {
@@ -580,13 +580,12 @@ TEST_F(WebsocketTest, StatusTransitionsOnConnect) {
     std::vector<Websocket::Status> observed_statuses;
     std::mutex status_mutex;
 
-    std::shared_ptr<Websocket> ws;
-    ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() {
             {
                 std::lock_guard<std::mutex> lock(status_mutex);
-                observed_statuses.push_back(ws->status());
+                observed_statuses.push_back(ws.status());
             }
             connected_sync.notify();
         },
@@ -595,13 +594,13 @@ TEST_F(WebsocketTest, StatusTransitionsOnConnect) {
         [&](std::string&&) {}
     );
 
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 
-    ws->open();
+    ws.open();
 
     // Should transition to CONNECTING
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    auto status_after_open = ws->status();
+    auto status_after_open = ws.status();
     EXPECT_TRUE(status_after_open == Websocket::Status::CONNECTING ||
                 status_after_open == Websocket::Status::CONNECTED);
 
@@ -609,15 +608,15 @@ TEST_F(WebsocketTest, StatusTransitionsOnConnect) {
 
     EXPECT_TRUE(connected_sync.is_triggered());
     if (connected_sync.is_triggered()) {
-        EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+        EXPECT_EQ(ws.status(), Websocket::Status::CONNECTED);
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, CannotSendWhenDisconnected) {
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() {},
         [&]() {},
@@ -625,17 +624,17 @@ TEST_F(WebsocketTest, CannotSendWhenDisconnected) {
         [&](std::string&&) {}
     );
 
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 
-    // Sending when disconnected shouldn't crash (message gets queued)
+    // Sending before open() shouldn't crash (logged and dropped)
     const char* msg = "test";
-    EXPECT_NO_THROW(ws->send(msg, strlen(msg)));
+    EXPECT_NO_THROW(ws.send(msg, strlen(msg)));
 }
 
 TEST_F(WebsocketTest, IsRunningAfterFirstOpen) {
     EventSynchronizer connected_sync;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
@@ -645,14 +644,14 @@ TEST_F(WebsocketTest, IsRunningAfterFirstOpen) {
 
     EXPECT_FALSE(Websocket::is_running());
 
-    ws->open();
+    ws.open();
 
     // Give it time to start the service thread
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     EXPECT_TRUE(Websocket::is_running());
 
-    ws->close();
+    ws.close();
 }
 
 // ======================== Error Handling Tests ========================
@@ -663,7 +662,7 @@ TEST_F(WebsocketTest, MultipleErrorCallbacks) {
     auto error_messages = std::make_shared<std::vector<std::string>>();
     auto error_mutex = std::make_shared<std::mutex>();
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://invalid-host-12345.test",
         []() {},
         []() {},
@@ -675,7 +674,7 @@ TEST_F(WebsocketTest, MultipleErrorCallbacks) {
         }
     );
 
-    ws->open();
+    ws.open();
 
     // Wait for error
     wait_for_condition([error_count]() { return error_count->load() > 0; },
@@ -687,7 +686,7 @@ TEST_F(WebsocketTest, MultipleErrorCallbacks) {
     EXPECT_FALSE(error_messages->empty());
 
     // Close the websocket to clean up
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, ReconnectAfterError) {
@@ -696,7 +695,7 @@ TEST_F(WebsocketTest, ReconnectAfterError) {
     auto error_count = std::make_shared<std::atomic<int>>(0);
     EventSynchronizer second_connected_sync;
 
-    auto ws_first = std::make_shared<Websocket>(
+    Websocket ws_first(
         "wss://invalid-host-xyz.test",
         []() {},
         []() {},
@@ -707,16 +706,16 @@ TEST_F(WebsocketTest, ReconnectAfterError) {
         }
     );
 
-    ws_first->open();
+    ws_first.open();
     first_error_sync->wait_for(std::chrono::milliseconds(5000));
 
     EXPECT_GT(error_count->load(), 0);
 
     // Close the first websocket to clean up before moving on
-    ws_first->close();
+    ws_first.close();
 
     // Now try connecting to a valid host with a new instance
-    auto ws_second = std::make_shared<Websocket>(
+    Websocket ws_second(
         "wss://ws.postman-echo.com/raw",
         [&]() { second_connected_sync.notify(); },
         [&]() {},
@@ -724,12 +723,12 @@ TEST_F(WebsocketTest, ReconnectAfterError) {
         [&](std::string) {}
     );
 
-    ws_second->open();
+    ws_second.open();
     second_connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     if (second_connected_sync.is_triggered()) {
-        EXPECT_EQ(ws_second->status(), Websocket::Status::CONNECTED);
-        ws_second->close();
+        EXPECT_EQ(ws_second.status(), Websocket::Status::CONNECTED);
+        ws_second.close();
     }
 }
 
@@ -739,7 +738,7 @@ TEST_F(WebsocketTest, EmptyMessageSend) {
     EventSynchronizer connected_sync;
     EventSynchronizer data_sync;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
@@ -751,20 +750,20 @@ TEST_F(WebsocketTest, EmptyMessageSend) {
         [&](std::string) {}
     );
 
-    ws->open();
+    ws.open();
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     EXPECT_TRUE(connected_sync.is_triggered());
     if (connected_sync.is_triggered()) {
         // Send empty message
-        ws->send("", 0);
+        ws.send("", 0);
 
         // Some servers may echo it back, others may not
         data_sync.wait_for(std::chrono::milliseconds(2000));
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, RapidOpenClose) {
@@ -772,7 +771,7 @@ TEST_F(WebsocketTest, RapidOpenClose) {
     EventSynchronizer disconnected_sync;
     EventSynchronizer error_sync;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() { disconnected_sync.notify(); },
@@ -781,31 +780,31 @@ TEST_F(WebsocketTest, RapidOpenClose) {
     );
 
     // Rapidly open and close
-    ws->open();
+    ws.open();
     wait_for_condition([&]() {
         return connected_sync.is_triggered() || error_sync.is_triggered();
     }, std::chrono::milliseconds(1000));
 
     if (connected_sync.is_triggered()) {
-        EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+        EXPECT_EQ(ws.status(), Websocket::Status::CONNECTED);
     }
 
-    ws->close();
+    ws.close();
     EXPECT_TRUE(wait_for_condition([&]() {
-        return ws->status() == Websocket::Status::DISCONNECTED ||
-            ws->status() == Websocket::Status::DISCONNECTING ||
+        return ws.status() == Websocket::Status::DISCONNECTED ||
+            ws.status() == Websocket::Status::DISCONNECTING ||
             disconnected_sync.is_triggered();
     }, std::chrono::milliseconds(2000)));
 
     // Should not crash
-    EXPECT_TRUE(ws->status() == Websocket::Status::DISCONNECTED ||
-                ws->status() == Websocket::Status::DISCONNECTING);
+    EXPECT_TRUE(ws.status() == Websocket::Status::DISCONNECTED ||
+                ws.status() == Websocket::Status::DISCONNECTING);
 }
 
 TEST_F(WebsocketTest, DoubleClose) {
     EventSynchronizer connected_sync;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() { connected_sync.notify(); },
         [&]() {},
@@ -813,18 +812,18 @@ TEST_F(WebsocketTest, DoubleClose) {
         [&](std::string) {}
     );
 
-    ws->open();
+    ws.open();
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     EXPECT_TRUE(connected_sync.is_triggered());
     if (connected_sync.is_triggered()) {
-        ws->close();
+        ws.close();
 
         // Second close should not crash
-        EXPECT_NO_THROW(ws->close());
+        EXPECT_NO_THROW(ws.close());
     } else {
         // Always close the websocket even if connection failed
-        ws->close();
+        ws.close();
     }
 }
 
@@ -832,7 +831,7 @@ TEST_F(WebsocketTest, DestructorWhileConnected) {
     EventSynchronizer connected_sync;
 
     {
-        auto ws = std::make_shared<Websocket>(
+        Websocket ws(
             "wss://ws.postman-echo.com/raw",
             [&]() { connected_sync.notify(); },
             [&]() {},
@@ -840,7 +839,7 @@ TEST_F(WebsocketTest, DestructorWhileConnected) {
             [&](std::string) {}
         );
 
-        ws->open();
+        ws.open();
         connected_sync.wait_for(std::chrono::milliseconds(10000));
 
         // Let ws go out of scope while connected
@@ -865,7 +864,7 @@ TEST_F(WebsocketTest, PlainWebsocket_UrlParsing) {
     auto connected = std::make_shared<std::atomic<bool>>(false);
     auto error_message = std::make_shared<std::string>();
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "ws://localhost:9001",  // Local server (won't be running in CI)
         [connected]() { connected->store(true); },
         []() {},
@@ -876,22 +875,22 @@ TEST_F(WebsocketTest, PlainWebsocket_UrlParsing) {
         }
     );
 
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 
-    ws->open();
+    ws.open();
 
     // Wait a bit to see if connection succeeds or fails
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // Either connected to local server OR got connection error (expected in CI)
     if (connected->load()) {
-        EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+        EXPECT_EQ(ws.status(), Websocket::Status::CONNECTED);
         std::cout << "Note: Successfully connected to local plain WebSocket server\n";
-        ws->close();
+        ws.close();
     } else {
         // Expected behavior when no local server is running
         std::cout << "Note: Plain WebSocket test - no local server running (expected in CI)\n";
-        ws->close();
+        ws.close();
     }
 
     // This test passes either way - it verifies the code doesn't crash
@@ -906,7 +905,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MessageQueuedAndSentAfterConnect)
     std::string received_data;
     std::atomic<bool> message_sent{false};
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() {
             connected_sync.notify();
@@ -920,18 +919,18 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MessageQueuedAndSentAfterConnect)
     );
 
     // Initial state should be DISCONNECTED
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 
     // Open the WebSocket connection
-    ws->open();
+    ws.open();
 
     // Immediately send data right after calling open (before connection is established)
     const char* test_message = "Immediate message after open";
-    ws->send(test_message, strlen(test_message));
+    ws.send(test_message, strlen(test_message));
     message_sent.store(true);
 
     // At this point, the connection should be CONNECTING or CONNECTED
-    auto status_after_send = ws->status();
+    auto status_after_send = ws.status();
     EXPECT_TRUE(status_after_send == Websocket::Status::CONNECTING ||
                 status_after_send == Websocket::Status::CONNECTED);
 
@@ -940,7 +939,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MessageQueuedAndSentAfterConnect)
 
     EXPECT_TRUE(connected_sync.is_triggered());
     if (connected_sync.is_triggered()) {
-        EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+        EXPECT_EQ(ws.status(), Websocket::Status::CONNECTED);
         EXPECT_TRUE(message_sent.load());
 
         // Wait for the echo response
@@ -953,7 +952,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MessageQueuedAndSentAfterConnect)
     }
 
     // Always close the websocket
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MultipleMessages) {
@@ -962,7 +961,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MultipleMessages) {
     std::vector<std::string> received_messages;
     std::mutex messages_mutex;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() {
             connected_sync.notify();
@@ -976,16 +975,16 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MultipleMessages) {
         [&](std::string) {}
     );
 
-    EXPECT_EQ(ws->status(), Websocket::Status::DISCONNECTED);
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED);
 
     // Open connection
-    ws->open();
+    ws.open();
 
     // Immediately send multiple messages right after open
     const int num_messages = 3;
     for (int i = 0; i < num_messages; ++i) {
         std::string msg = "Quick message " + std::to_string(i);
-        ws->send(msg.c_str(), msg.size());
+        ws.send(msg.c_str(), msg.size());
     }
 
     // Wait for connection to establish
@@ -993,7 +992,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MultipleMessages) {
 
     EXPECT_TRUE(connected_sync.is_triggered());
     if (connected_sync.is_triggered()) {
-        EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+        EXPECT_EQ(ws.status(), Websocket::Status::CONNECTED);
 
         // Wait for all messages to be received
         wait_for_condition([&]() { return messages_received >= num_messages; },
@@ -1006,7 +1005,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_MultipleMessages) {
         EXPECT_GE(received_messages.size(), static_cast<size_t>(num_messages));
     }
 
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, SendImmediatelyAfterOpen_VerifyOrderPreserved) {
@@ -1015,7 +1014,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_VerifyOrderPreserved) {
     std::vector<std::string> received_messages;
     std::mutex messages_mutex;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() {
             connected_sync.notify();
@@ -1029,12 +1028,12 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_VerifyOrderPreserved) {
         [&](std::string) {}
     );
 
-    ws->open();
+    ws.open();
 
     // Send messages immediately after open - they should be queued
-    ws->send("First", 5);
-    ws->send("Second", 6);
-    ws->send("Third", 5);
+    ws.send("First", 5);
+    ws.send("Second", 6);
+    ws.send("Third", 5);
 
     // Wait for connection
     connected_sync.wait_for(std::chrono::milliseconds(10000));
@@ -1056,7 +1055,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_VerifyOrderPreserved) {
         }
     }
 
-    ws->close();
+    ws.close();
 }
 
 TEST_F(WebsocketTest, SendImmediatelyAfterOpen_LargeMessage) {
@@ -1064,7 +1063,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_LargeMessage) {
     EventSynchronizer data_sync;
     std::string received_data;
 
-    auto ws = std::make_shared<Websocket>(
+    Websocket ws(
         "wss://ws.postman-echo.com/raw",
         [&]() {
             connected_sync.notify();
@@ -1077,18 +1076,18 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_LargeMessage) {
         [&](std::string) {}
     );
 
-    ws->open();
+    ws.open();
 
     // Send a large message immediately after open
     std::string large_message(5120, 'X');  // 5KB message
-    ws->send(large_message.c_str(), large_message.size());
+    ws.send(large_message.c_str(), large_message.size());
 
     // Wait for connection
     connected_sync.wait_for(std::chrono::milliseconds(10000));
 
     EXPECT_TRUE(connected_sync.is_triggered());
     if (connected_sync.is_triggered()) {
-        EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+        EXPECT_EQ(ws.status(), Websocket::Status::CONNECTED);
 
         // Wait for the large message echo
         data_sync.wait_for(std::chrono::milliseconds(10000));
@@ -1099,7 +1098,7 @@ TEST_F(WebsocketTest, SendImmediatelyAfterOpen_LargeMessage) {
         }
     }
 
-    ws->close();
+    ws.close();
 }
 
 // Note: Main tests use wss://ws.postman-echo.com which is a public test server.
@@ -1193,6 +1192,56 @@ TEST_F(WebsocketTest, Reconnect_NewObject_AfterGracefulClose_Connects) {
     ws2->close();
 }
 
+TEST_F(WebsocketTest, Reconnect_AfterGracefulClose_Connects) {
+    EventSynchronizer ws_connected, ws_disconnected;
+    EventSynchronizer ws2_connected;
+    ReceivedMessages received;
+
+    Websocket ws(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { ws_connected.notify(); },
+        [&]() { ws_disconnected.notify(); },
+        [&](const char* d, std::size_t l) { received.add(d, l); },
+        [&](std::string&&) {}
+    );
+
+    ws.open();
+    ws_connected.wait_for(std::chrono::milliseconds(10000));
+
+    if (!ws_connected.is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+
+    ws.close();
+    bool disconnected = wait_for_condition(
+        [&]() { return ws.status() == Websocket::Status::DISCONNECTED; },
+        std::chrono::milliseconds(5000));
+    ASSERT_TRUE(disconnected) << "ws did not reach DISCONNECTED";
+
+    ws_connected.reset();
+    ws_disconnected.reset();
+
+    ws.open();
+    ws_connected.wait_for(std::chrono::milliseconds(10000));
+
+    ASSERT_TRUE(ws_connected.is_triggered()) << "ws2 failed to connect after ws1 closed";
+    EXPECT_EQ(ws.status(), Websocket::Status::CONNECTED);
+
+    const std::string msg = "hello-from-ws2";
+    ws.send(msg.data(), msg.size());
+    received.sync.wait_for(std::chrono::milliseconds(5000));
+
+    EXPECT_TRUE(received.sync.is_triggered()) << "No echo received on ws2";
+    if (received.sync.is_triggered()) {
+        std::lock_guard<std::mutex> lk(received.mtx);
+        EXPECT_FALSE(received.msgs.empty());
+        if (!received.msgs.empty()) {
+            EXPECT_EQ(received.msgs[0], msg);
+        }
+    }
+    ws.close();
+}
+
 // TEST 2: Multiple consecutive new-object reconnect cycles
 TEST_F(WebsocketTest, Reconnect_NewObject_MultipleConsecutiveCycles_AllConnect) {
     std::atomic<int> total_connects{0};
@@ -1235,6 +1284,58 @@ TEST_F(WebsocketTest, Reconnect_NewObject_MultipleConsecutiveCycles_AllConnect) 
         ws->close();
         bool disc = wait_for_condition(
             [&]() { return ws->status() == Websocket::Status::DISCONNECTED; },
+            std::chrono::milliseconds(5000));
+        EXPECT_TRUE(disc) << "Cycle " << cycle << ": did not reach DISCONNECTED";
+    }
+
+    EXPECT_EQ(total_connects.load(), 3);
+    EXPECT_EQ(total_disconnects.load(), 3);
+}
+
+TEST_F(WebsocketTest, Reconnect_MultipleConsecutiveCycles_AllConnect) {
+    std::atomic<int> total_connects{0};
+    std::atomic<int> total_disconnects{0};
+    EventSynchronizer connected_sync, disconnected_sync;
+    ReceivedMessages received;
+
+    Websocket ws(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { connected_sync.notify(); total_connects++; },
+        [&]() { disconnected_sync.notify(); total_disconnects++; },
+        [&](const char* d, std::size_t l) { received.add(d, l); },
+        [&](std::string&&) {}
+    );
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        connected_sync.reset();
+        disconnected_sync.reset();
+        received.clear();
+
+        ws.open();
+        connected_sync.wait_for(std::chrono::milliseconds(10000));
+
+        if (!connected_sync.is_triggered()) {
+            if (cycle == 0) {
+                GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+            }
+            FAIL() << "Cycle " << cycle << ": failed to connect";
+            break;
+        }
+
+        const std::string msg = "cycle-" + std::to_string(cycle);
+        ws.send(msg.data(), msg.size());
+        received.sync.wait_for(std::chrono::milliseconds(5000));
+
+        EXPECT_TRUE(received.sync.is_triggered()) << "Cycle " << cycle << ": no echo";
+        {
+            std::lock_guard<std::mutex> lk(received.mtx);
+            ASSERT_FALSE(received.msgs.empty()) << "Cycle " << cycle << ": no message";
+            EXPECT_EQ(received.msgs[0], msg) << "Cycle " << cycle << ": data mismatch";
+        }
+
+        ws.close();
+        bool disc = wait_for_condition(
+            [&]() { return ws.status() == Websocket::Status::DISCONNECTED; },
             std::chrono::milliseconds(5000));
         EXPECT_TRUE(disc) << "Cycle " << cycle << ": did not reach DISCONNECTED";
     }
@@ -1290,6 +1391,43 @@ TEST_F(WebsocketTest, Reconnect_NewObject_FromWithinDisconnectCallback_Connects)
     EXPECT_EQ((*ws2_holder)->status(), Websocket::Status::CONNECTED);
 
     if (*ws2_holder) (*ws2_holder)->close();
+}
+
+TEST_F(WebsocketTest, Reconnect_FromWithinDisconnectCallback_Connects) {
+    // Use shared_ptr captures: ws2's callbacks may fire after wait_for times out.
+    auto ws_connected = std::make_shared<EventSynchronizer>();
+
+    std::shared_ptr<Websocket> ws; // must outlive the callback
+    ws = std::make_shared<Websocket>(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { ws_connected->notify(); },
+        [&]() {
+            // Running on the service thread. Must not block.
+            ws->open(); // reconnect the same object
+            // Return immediately — the co_spawn runs after this callback exits.
+        },
+        [](const char*, std::size_t) {},
+        [](std::string&&) {}
+    );
+
+    ws->open();
+    ws_connected->wait_for(std::chrono::milliseconds(10000));
+
+    if (!ws_connected->is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+
+    ws_connected->reset(); // reset before reconnecting to reuse the same synchronizer for ws2
+    ws->close();
+    // Wait for ws2 to connect (ws1 close time + ws2 connect time)
+    ws_connected->wait_for(std::chrono::milliseconds(15000));
+
+    ASSERT_TRUE(ws_connected->is_triggered())
+        << "ws2 failed to connect when opened from within the disconnect callback. "
+           "Possible deadlock: callback blocked the service thread.";
+    EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+
+    ws->close();
 }
 
 // TEST 4: Reconnect new object from within the error callback
@@ -1724,6 +1862,344 @@ TEST_F(WebsocketTest, Reconnect_ConcurrentNewObjects_BothConnect) {
 
     ws1->close();
     ws2->close();
+}
+
+// Same-object version of TEST 4: Reconnect from within error callback
+TEST_F(WebsocketTest, Reconnect_FromWithinErrorCallback_Connects) {
+    // Use shared holder to avoid dangling [&ws] if DNS times out past wait_for.
+    auto error_count = std::make_shared<std::atomic<int>>(0);
+    auto second_error_sync = std::make_shared<EventSynchronizer>();
+    auto ws_holder = std::make_shared<std::shared_ptr<Websocket>>();
+
+    *ws_holder = std::make_shared<Websocket>(
+        "wss://invalid-host-reconnect-test-xyz.example",
+        []() {},
+        []() {},
+        [](const char*, std::size_t) {},
+        [ws_holder, error_count, second_error_sync](std::string&&) {
+            int count = ++(*error_count);
+            if (count == 1) {
+                (*ws_holder)->open();
+            } else if (count == 2) {
+                second_error_sync->notify();
+            }
+        }
+    );
+
+    (*ws_holder)->open();
+    // DNS error + reconnect DNS error: allow up to 20 s
+    second_error_sync->wait_for(std::chrono::milliseconds(20000));
+
+    ASSERT_TRUE(second_error_sync->is_triggered())
+        << "Second error not received after same-object open() from error callback. "
+           "Possible deadlock: callback blocked the service thread.";
+    EXPECT_GE(error_count->load(), 2);
+
+    (*ws_holder)->reset_callbacks(); // break circular ref before close
+    (*ws_holder)->close();
+}
+
+// Same-object version of TEST 5: Reconnect after close triggered from data callback
+TEST_F(WebsocketTest, Reconnect_AfterDisconnectInDataCallback_Connects) {
+    std::atomic<int> session{0};
+    EventSynchronizer ws_connected;
+    ReceivedMessages ws2_received;
+    std::atomic<bool> close_triggered{false};
+
+    std::shared_ptr<Websocket> ws;
+    ws = std::make_shared<Websocket>(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { ws_connected.notify(); },
+        [&]() {},
+        [&](const char* d, std::size_t l) {
+            if (session.load() == 0 && !close_triggered.exchange(true)) {
+                ws->close();
+            } else if (session.load() == 1) {
+                ws2_received.add(d, l);
+            }
+        },
+        [&](std::string&&) {}
+    );
+
+    ws->open();
+    ws_connected.wait_for(std::chrono::milliseconds(10000));
+    if (!ws_connected.is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+
+    ws->send("trigger-close", 13);
+
+    bool disc = wait_for_condition(
+        [&]() { return ws->status() == Websocket::Status::DISCONNECTED; },
+        std::chrono::milliseconds(5000));
+    ASSERT_TRUE(disc) << "ws did not reach DISCONNECTED after close-in-data-callback";
+
+    session.store(1);
+    ws_connected.reset();
+
+    ws->open();
+    ws_connected.wait_for(std::chrono::milliseconds(10000));
+
+    ASSERT_TRUE(ws_connected.is_triggered()) << "ws failed to reconnect after data-callback close";
+    EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+
+    const std::string msg = "after-data-close";
+    ws->send(msg.data(), msg.size());
+    ws2_received.sync.wait_for(std::chrono::milliseconds(5000));
+
+    EXPECT_TRUE(ws2_received.sync.is_triggered());
+    {
+        std::lock_guard<std::mutex> lk(ws2_received.mtx);
+        ASSERT_FALSE(ws2_received.msgs.empty());
+        EXPECT_EQ(ws2_received.msgs[0], msg);
+    }
+    ws->close();
+}
+
+// Same-object version of TEST 6: Reconnect after close triggered from connected callback
+TEST_F(WebsocketTest, Reconnect_AfterServerSideClose_Connects) {
+    std::atomic<int> session{0};
+    EventSynchronizer session0_connected;
+    EventSynchronizer ws_connected;
+    ReceivedMessages received;
+
+    std::shared_ptr<Websocket> ws;
+    ws = std::make_shared<Websocket>(
+        "wss://ws.postman-echo.com/raw",
+        [&]() {
+            if (session.load() == 0) {
+                session0_connected.notify();
+                ws->close(); // simulate immediate server-side close in session 0
+            } else {
+                ws_connected.notify();
+            }
+        },
+        [&]() {},
+        [&](const char* d, std::size_t l) { received.add(d, l); },
+        [&](std::string&&) {}
+    );
+
+    ws->open();
+    bool disc = wait_for_condition(
+        [&]() { return ws->status() == Websocket::Status::DISCONNECTED; },
+        std::chrono::milliseconds(10000));
+
+    if (!session0_connected.is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+    ASSERT_TRUE(disc) << "ws did not reach DISCONNECTED";
+
+    session.store(1);
+    ws->open();
+    ws_connected.wait_for(std::chrono::milliseconds(10000));
+
+    ASSERT_TRUE(ws_connected.is_triggered()) << "ws failed to reconnect after server-side close";
+    EXPECT_EQ(ws->status(), Websocket::Status::CONNECTED);
+
+    const std::string msg = "after-server-close";
+    ws->send(msg.data(), msg.size());
+    received.sync.wait_for(std::chrono::milliseconds(5000));
+
+    EXPECT_TRUE(received.sync.is_triggered());
+    {
+        std::lock_guard<std::mutex> lk(received.mtx);
+        ASSERT_FALSE(received.msgs.empty());
+        EXPECT_EQ(received.msgs[0], msg);
+    }
+    ws->close();
+}
+
+// Same-object version of TEST 7: No data bleed between sessions on the same object
+TEST_F(WebsocketTest, Reconnect_SameObject_DataIntegrity_NoBleedBetweenSessions) {
+    EventSynchronizer ws_connected;
+    ReceivedMessages received;
+
+    Websocket ws(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { ws_connected.notify(); },
+        [&]() {},
+        [&](const char* d, std::size_t l) { received.add(d, l); },
+        [&](std::string&&) {}
+    );
+
+    // Session A
+    ws.open();
+    ws_connected.wait_for(std::chrono::milliseconds(10000));
+    if (!ws_connected.is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+
+    ws.send("session-A", 9);
+    received.sync.wait_for(std::chrono::milliseconds(5000));
+    ASSERT_TRUE(received.sync.is_triggered());
+
+    ws.close();
+    bool disc = wait_for_condition(
+        [&]() { return ws.status() == Websocket::Status::DISCONNECTED; },
+        std::chrono::milliseconds(5000));
+    ASSERT_TRUE(disc);
+
+    // Session B — same object
+    ws_connected.reset();
+    received.clear();
+
+    ws.open();
+    ws_connected.wait_for(std::chrono::milliseconds(10000));
+    ASSERT_TRUE(ws_connected.is_triggered());
+
+    // Wait briefly — any stale data from session A would appear here
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    {
+        std::lock_guard<std::mutex> lk(received.mtx);
+        EXPECT_TRUE(received.msgs.empty())
+            << "Stale data from session A appeared in session B (same Websocket object)";
+    }
+
+    ws.send("session-B", 9);
+    received.sync.wait_for(std::chrono::milliseconds(5000));
+    EXPECT_TRUE(received.sync.is_triggered());
+    {
+        std::lock_guard<std::mutex> lk(received.mtx);
+        EXPECT_EQ(received.msgs.size(), 1u);
+        if (!received.msgs.empty()) {
+            EXPECT_EQ(received.msgs[0], "session-B");
+        }
+    }
+    ws.close();
+}
+
+// Same-object version of TEST 8: Rapid close/open cycles — service thread must remain functional
+TEST_F(WebsocketTest, Reconnect_SameObject_RapidSuccessiveCycles_ServiceThreadRemainsFunctional) {
+    std::atomic<int> session{0};
+    EventSynchronizer first_connected;
+    EventSynchronizer final_connected;
+    ReceivedMessages received;
+
+    Websocket ws(
+        "wss://ws.postman-echo.com/raw",
+        [&]() {
+            int s = session.load();
+            if (s == 0) first_connected.notify();
+            else if (s == 1) final_connected.notify();
+        },
+        [&]() {},
+        [&](const char* d, std::size_t l) {
+            if (session.load() == 1) received.add(d, l);
+        },
+        [&](std::string&&) {}
+    );
+
+    ws.open();
+    first_connected.wait_for(std::chrono::milliseconds(10000));
+    if (!first_connected.is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+
+    // Rapidly close and reopen — no waits between iterations
+    for (int i = 0; i < 5; ++i) {
+        ws.close();
+        ws.open();
+    }
+
+    bool settled = wait_for_condition(
+        [&]() {
+            auto s = ws.status();
+            return s == Websocket::Status::CONNECTED || s == Websocket::Status::DISCONNECTED;
+        },
+        std::chrono::milliseconds(15000));
+    ASSERT_TRUE(settled) << "ws stuck in CONNECTING/DISCONNECTING after rapid same-object cycles";
+
+    // Close and do one final clean open to verify the write pipeline is still functional
+    ws.close();
+    wait_for_condition([&]() { return ws.status() == Websocket::Status::DISCONNECTED; },
+                      std::chrono::milliseconds(3000));
+
+    session.store(1);
+    ws.open();
+    final_connected.wait_for(std::chrono::milliseconds(10000));
+
+    if (final_connected.is_triggered()) {
+        ws.send("stability-check", 15);
+        received.sync.wait_for(std::chrono::milliseconds(5000));
+        EXPECT_TRUE(received.sync.is_triggered())
+            << "Write pipeline deadlocked after rapid same-object reconnect cycles";
+    }
+    ws.close();
+}
+
+// Same-object version of TEST 9: Callbacks fire in correct order across multiple sessions
+TEST_F(WebsocketTest, Reconnect_SameObject_CallbacksFireInCorrectOrder) {
+    struct Event { std::string name; int session; };
+    std::vector<Event> event_log;
+    std::mutex log_mutex;
+
+    std::atomic<int> current_session{0};
+    EventSynchronizer connected_sync, disconnected_sync;
+    ReceivedMessages received;
+
+    auto log_event = [&](std::string name) {
+        std::lock_guard<std::mutex> lk(log_mutex);
+        event_log.push_back({std::move(name), current_session.load()});
+    };
+
+    Websocket ws(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { log_event("connected"); connected_sync.notify(); },
+        [&]() { log_event("disconnected"); disconnected_sync.notify(); },
+        [&](const char* d, std::size_t l) { log_event("data"); received.add(d, l); },
+        [&](std::string&&) {}
+    );
+
+    for (int session = 0; session < 3; ++session) {
+        current_session.store(session);
+        connected_sync.reset();
+        disconnected_sync.reset();
+        received.clear();
+
+        ws.open();
+        connected_sync.wait_for(std::chrono::milliseconds(10000));
+
+        if (!connected_sync.is_triggered()) {
+            if (session == 0) {
+                GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+            }
+            FAIL() << "Session " << session << ": failed to connect";
+            break;
+        }
+
+        ws.send("order-check", 11);
+        received.sync.wait_for(std::chrono::milliseconds(5000));
+
+        ws.close();
+        disconnected_sync.wait_for(std::chrono::milliseconds(5000));
+    }
+
+    std::lock_guard<std::mutex> lk(log_mutex);
+
+    for (int session = 0; session < 3; ++session) {
+        int connected_pos = -1, disconnected_pos = -1;
+        std::vector<int> data_positions;
+
+        for (int i = 0; i < static_cast<int>(event_log.size()); ++i) {
+            if (event_log[i].session != session) continue;
+            if (event_log[i].name == "connected") connected_pos = i;
+            else if (event_log[i].name == "disconnected") disconnected_pos = i;
+            else if (event_log[i].name == "data") data_positions.push_back(i);
+        }
+
+        EXPECT_GE(connected_pos, 0) << "Session " << session << ": no connected event";
+        EXPECT_GE(disconnected_pos, 0) << "Session " << session << ": no disconnected event";
+
+        for (int dp : data_positions) {
+            EXPECT_LT(connected_pos, dp)
+                << "Session " << session << ": data fired before connected";
+            EXPECT_LT(dp, disconnected_pos)
+                << "Session " << session << ": data fired after disconnected";
+        }
+
+        EXPECT_LT(connected_pos, disconnected_pos)
+            << "Session " << session << ": disconnected fired before connected";
+    }
 }
 
 } // namespace slick::net
