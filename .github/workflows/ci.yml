@@ -68,7 +68,10 @@ jobs:
 
     - name: Setup vcpkg (using git clone)
       if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+      shell: bash
       run: |
+        # A restore-keys partial hit can populate this directory even on a cache miss.
+        rm -rf ${{ github.workspace }}/vcpkg
         git clone https://github.com/Microsoft/vcpkg.git ${{ github.workspace }}/vcpkg
         cd ${{ github.workspace }}/vcpkg
         git checkout 2025.12.12
