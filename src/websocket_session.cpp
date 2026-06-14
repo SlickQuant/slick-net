@@ -7,13 +7,17 @@ Websocket::Impl::Impl(
     std::function<void()> onConnectedCallback,
     std::function<void()> onDisconnectedCallback,
     std::function<void(const char*, std::size_t)> onDataCallback,
-    std::function<void(std::string &&err)> onErrorCallback)
+    std::function<void(std::string &&err)> onErrorCallback,
+    size_t write_buffer_size,
+    std::shared_ptr<slick::SlickStreamBuffer> read_stream_buffer)
     : url_(std::move(url))
     , on_connected_(std::move(onConnectedCallback))
     , on_diconnected_(std::move(onDisconnectedCallback))
     , on_data_(std::move(onDataCallback))
     , on_error_(std::move(onErrorCallback))
-    , w_buffer_(1048576) {
+    , w_buffer_(write_buffer_size)
+    , r_stream_buffer_(std::move(read_stream_buffer))
+    , r_buffer_(*r_stream_buffer_.get()) {
     std::string protocol("wss");
     auto pos = url_.find("://");
     if (pos == std::string::npos) {
@@ -63,32 +67,75 @@ Websocket::Impl::Impl(
 }
 
 void Websocket::Impl::open() {
+    if (open_cancelled_.load(std::memory_order_acquire) || is_detached()) {
+        // A deferred open that was cancelled or abandoned before it could start: this
+        // impl will never touch the shared read buffer, so forward ownership to any
+        // session chained behind it.
+        Status expected = Status::CONNECTING;
+        status_.compare_exchange_strong(expected, Status::DISCONNECTED, std::memory_order_acq_rel, std::memory_order_relaxed);
+        release_buffer();
+        return;
+    }
     Status expected = Status::DISCONNECTED;
     if (!status_.compare_exchange_strong(expected, Status::CONNECTING, std::memory_order_acq_rel)) {
-        if (expected == Status::CONNECTED) {
-            LOG_DEBUG("open: WebSocket {} already connected", url_);
+        if (expected != Status::CONNECTING || session_started_.exchange(true, std::memory_order_acq_rel)) {
+            if (expected == Status::CONNECTED) {
+                LOG_DEBUG("open: WebSocket {} already connected", url_);
+            }
+            else if (expected == Status::CONNECTING) {
+                LOG_DEBUG("open: WebSocket {} is connecting", url_);
+            }
+            else {
+                LOG_DEBUG("open: WebSocket {} is disconnecting", url_);
+            }
+            return;
         }
-        else if (expected == Status::CONNECTING) {
-            LOG_DEBUG("open: WebSocket {} is connecting", url_);
-        }
-        else {
-            LOG_DEBUG("open: WebSocket {} is disconnecting", url_);
-        }
-        return;
+        // mark_pending_open() pre-set CONNECTING and we won the session_started_
+        // exchange: this is the deferred open continuation - proceed.
+    }
+    else {
+        session_started_.store(true, std::memory_order_release);
     }
     LOG_INFO("Opening WebSocket {}", url_);
     asio::co_spawn(detail::ioc_, do_ws_session(),
         [self = shared_from_this()](std::exception_ptr eptr) {
+            std::string err;
+            bool failed = false;
             if (eptr) {
                 try {
                     std::rethrow_exception(eptr);
                 } catch (const std::exception& e) {
-                    self->status_.store(Status::DISCONNECTED, std::memory_order_release);
-                    if (detail::run_.load(std::memory_order_relaxed)) {
-                        self->on_error_(e.what());
-                    }
+                    failed = true;
+                    err = e.what();
                 }
             }
+            if (self->read_started_) {
+                if (failed) {
+                    // The exception escaped after the read loop began (e.g. the user's
+                    // onConnected callback threw): close so the pending read terminates
+                    // and releases the shared read buffer.
+                    self->close();
+                    self->status_.store(Status::DISCONNECTED, std::memory_order_release);
+                    if (detail::run_.load(std::memory_order_relaxed) && !self->is_detached()) {
+                        self->on_error_(std::move(err));
+                        self->on_diconnected_();
+                    }
+                }
+                return;
+            }
+            // The session ended without ever issuing a read.
+            const auto prev = self->status_.exchange(Status::DISCONNECTED, std::memory_order_acq_rel);
+            if (detail::run_.load(std::memory_order_relaxed) && !self->is_detached()) {
+                if (failed && prev != Status::DISCONNECTING) {
+                    self->on_error_(std::move(err));
+                }
+                if (failed || prev == Status::DISCONNECTING) {
+                    // The connection attempt failed, or the user closed it mid-connect.
+                    self->on_diconnected_();
+                }
+            }
+            // The shared read buffer was never touched - hand it to the next session.
+            self->release_buffer();
         });
 
     auto init_service = detail::init_service_thread_.load(std::memory_order_relaxed);
@@ -132,8 +179,11 @@ asio::awaitable<void> Websocket::Impl::do_ws_session() {
 asio::awaitable<void> Websocket::Impl::do_ws_session_ssl() {
     // SSL WebSocket (wss://)
     try {
-        if (status_.load(std::memory_order_relaxed) != Status::CONNECTING) {
+        if (status_.load(std::memory_order_relaxed) != Status::CONNECTING ||
+            open_cancelled_.load(std::memory_order_acquire) || is_detached()) {
             LOG_DEBUG("Abort connect. WebSocket {} is not CONNECTING", url_);
+            Status expected = Status::CONNECTING;
+            status_.compare_exchange_strong(expected, Status::DISCONNECTED, std::memory_order_acq_rel, std::memory_order_relaxed);
             co_return;
         }
         tcp::resolver resolver(asio::make_strand(detail::ioc_));
@@ -183,13 +233,36 @@ asio::awaitable<void> Websocket::Impl::do_ws_session_ssl() {
         // Perform the WebSocket handshake
         co_await wss_->async_handshake(host_header, path_, asio::use_awaitable);
 
-        if (status_.load(std::memory_order_relaxed) != Status::CONNECTING ||
-            !detail::run_.load(std::memory_order_relaxed)) [[unlikely]] {
-            // socket close is called
+        if (!detail::run_.load(std::memory_order_relaxed) ||
+            open_cancelled_.load(std::memory_order_acquire) || is_detached()) [[unlikely]] {
+            // shutdown/cancel was requested during connect
+            Status expected = Status::CONNECTING;
+            status_.compare_exchange_strong(expected, Status::DISCONNECTED, std::memory_order_acq_rel, std::memory_order_relaxed);
             co_return;
         }
 
-        status_.store(Status::CONNECTED, std::memory_order_release);
+        Status expected = Status::CONNECTING;
+        if (!status_.compare_exchange_strong(expected, Status::CONNECTED, std::memory_order_acq_rel, std::memory_order_relaxed)) [[unlikely]] {
+            // close() claimed the session during the handshake; the completion
+            // handler finalizes the state.
+            co_return;
+        }
+
+        if (!is_detached()) {
+            on_connected_();
+        }
+
+        if (status_.load(std::memory_order_relaxed) != Status::CONNECTED || is_detached()) {
+            // Closed or abandoned from within the connected callback; the read loop
+            // never starts, so the completion handler releases the shared read buffer.
+            co_return;
+        }
+
+        // Take over the shared read stream buffer: drop any partial bytes a previous
+        // session left committed-but-unpublished. Safe because this session only runs
+        // after the previous one released the buffer.
+        r_buffer_.clear();
+        read_started_ = true;
 
         // start read messages
         wss_->async_read(
@@ -198,7 +271,6 @@ asio::awaitable<void> Websocket::Impl::do_ws_session_ssl() {
                 &Websocket::Impl::on_read,
                 shared_from_this()));
 
-        on_connected_();
     }
     catch (beast::system_error const& se) {
         if (se.code() != websocket::error::closed) {
@@ -210,8 +282,11 @@ asio::awaitable<void> Websocket::Impl::do_ws_session_ssl() {
 asio::awaitable<void> Websocket::Impl::do_ws_session_plain() {
     // Plain WebSocket (ws://)
     try {
-        if (status_.load(std::memory_order_relaxed) != Status::CONNECTING) {
+        if (status_.load(std::memory_order_relaxed) != Status::CONNECTING ||
+            open_cancelled_.load(std::memory_order_acquire) || is_detached()) {
             LOG_DEBUG("Abort connect. WebSocket {} is not CONNECTING", url_);
+            Status expected = Status::CONNECTING;
+            status_.compare_exchange_strong(expected, Status::DISCONNECTED, std::memory_order_acq_rel, std::memory_order_relaxed);
             co_return;
         }
         tcp::resolver resolver(asio::make_strand(detail::ioc_));
@@ -249,13 +324,36 @@ asio::awaitable<void> Websocket::Impl::do_ws_session_plain() {
         // Perform the WebSocket handshake
         co_await ws_->async_handshake(host_header, path_, asio::use_awaitable);
 
-        if (status_.load(std::memory_order_relaxed) != Status::CONNECTING ||
-            !detail::run_.load(std::memory_order_relaxed)) [[unlikely]] {
-            // socket close is called
+        if (!detail::run_.load(std::memory_order_relaxed) ||
+            open_cancelled_.load(std::memory_order_acquire) || is_detached()) [[unlikely]] {
+            // shutdown/cancel was requested during connect
+            Status expected = Status::CONNECTING;
+            status_.compare_exchange_strong(expected, Status::DISCONNECTED, std::memory_order_acq_rel, std::memory_order_relaxed);
             co_return;
         }
 
-        status_.store(Status::CONNECTED, std::memory_order_release);
+        Status expected = Status::CONNECTING;
+        if (!status_.compare_exchange_strong(expected, Status::CONNECTED, std::memory_order_acq_rel, std::memory_order_relaxed)) [[unlikely]] {
+            // close() claimed the session during the handshake; the completion
+            // handler finalizes the state.
+            co_return;
+        }
+
+        if (!is_detached()) {
+            on_connected_();
+        }
+
+        if (status_.load(std::memory_order_relaxed) != Status::CONNECTED || is_detached()) {
+            // Closed or abandoned from within the connected callback; the read loop
+            // never starts, so the completion handler releases the shared read buffer.
+            co_return;
+        }
+
+        // Take over the shared read stream buffer: drop any partial bytes a previous
+        // session left committed-but-unpublished. Safe because this session only runs
+        // after the previous one released the buffer.
+        r_buffer_.clear();
+        read_started_ = true;
 
         // start read messages
         ws_->async_read(
@@ -264,7 +362,6 @@ asio::awaitable<void> Websocket::Impl::do_ws_session_plain() {
                 &Websocket::Impl::on_read,
                 shared_from_this()));
 
-        on_connected_();
     }
     catch (beast::system_error const& se) {
         if (se.code() != websocket::error::closed) {

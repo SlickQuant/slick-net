@@ -100,18 +100,30 @@ target_link_libraries(your_target PRIVATE slick::net)
 
 ### Runtime Logging Hooks
 
-Internal slick-net logs are routed via runtime hooks:
+Internal slick-net logs are routed via runtime hooks. `set_log_handler()` optionally
+takes a `LogLevelGetter` so `LOG_*` macros can skip formatting/argument evaluation
+entirely when the level is disabled:
 
 ```cpp
 #include <slick/net/logging.hpp>
 
-slick::net::set_log_handler([](slick::net::LogLevel level, const char* format_text, std::format_args args) {
-    // Route to your logger
-});
+slick::net::set_log_handler(
+    [](slick::net::LogLevel level, const char* format_text, std::format_args args) {
+        // Route to your logger
+    },
+    []() {
+        return slick::net::LogLevel::Info; // minimum level to log
+    }
+);
 
 // Optional cleanup
 slick::net::clear_log_handler();
 ```
+
+**LogLevel:** `Trace`, `Debug`, `Info`, `Warn`, `Error`, `Fatal`, `Off`
+
+**Macros:** `LOG_TRACE`, `LOG_DEBUG`, `LOG_INFO`, `LOG_WARN`, `LOG_ERROR`, `LOG_FATAL` — each
+checks `should_log()` before evaluating its arguments.
 
 ## Usage
 
@@ -215,6 +227,7 @@ cmake --build .
 Run examples:
 ```bash
 ./examples/websocket_client_example
+./examples/websocket_reading_from_different_thread_example
 ./examples/http_client_example
 ./examples/http_stream_client_example
 ./examples/http_awaitable_client_example
@@ -328,15 +341,23 @@ Websocket(
     std::function<void()> onConnected,
     std::function<void()> onDisconnected,
     std::function<void(const char*, std::size_t)> onData,
-    std::function<void(std::string&&)> onError
+    std::function<void(std::string&&)> onError,
+    uint32_t write_buffer_size = 1u << 20,   // 1 MB write buffer
+    uint32_t read_buffer_size = 1u << 26,    // 64 MB reading buffer
+    uint32_t read_record_size = 1u << 16,    // 64K message records
+    std::string read_buffer_shm_name = ""    // optional shared-memory name for the read buffer
 )
 ```
 
 **Methods:**
 - `void open()` - Start or restart the WebSocket connection (see [Reconnect](#reconnect) below)
-- `void close()` - Close the WebSocket connection
-- `void send(const char* buffer, size_t len)` - Send data through the WebSocket
+- `bool close()` - Close the WebSocket connection
+- `void send(const char* buffer, size_t len, bool is_binary = false, bool suppress_log = false)` - Send data through the WebSocket
+- `void send_binary_data(const char* buffer, size_t len, bool suppress_log = false)` - Send binary data through the WebSocket
+- `bool drain_data(uint64_t& cursor, std::function<void(const char*, std::size_t)>&& on_data, std::size_t max_num_data = 100)` - Drain received messages from a caller-owned thread (see [Reading from a different thread](#reading-from-a-different-thread) below)
+- `uint64_t initial_reading_index() const` - Starting cursor value for `drain_data()`
 - `Status status() const` - Get current connection status
+- `void detach()` - Suppress callbacks from this object's session (used internally during teardown/reconnect)
 - `static void shutdown()` - Shutdown all WebSocket services
 
 **Status Enum:**
@@ -377,6 +398,46 @@ Rapid reconnect (call open() while DISCONNECTING):
 ```
 
 If you need a guaranteed `onDisconnected` for every session — for example, to flush per-session state — wait for `status() == DISCONNECTED` before calling `open()` again.
+
+#### Deferred reconnect
+
+The internal read buffer is single-producer, so a same-object `open()` is deferred until
+the previous session's read loop has fully released it (normally ~1 round trip, bounded
+by the close timeout). `status()` reads `CONNECTING` during this window, and any partial
+data left over from the interrupted session is discarded before the new session starts
+reading.
+
+### Reading from a different thread
+
+By default, `onData` (and the other callbacks) run on the WebSocket's internal service
+thread. To process messages on your own thread instead, call `drain_data()` in a loop —
+it reads from a shared `slick::dynamic_buffer`/`slick::stream_buffer` populated by the
+service thread:
+
+```cpp
+std::shared_ptr<Websocket> ws = std::make_shared<Websocket>(
+    "wss://advanced-trade-ws.coinbase.com",
+    [&]() { /* onConnected: send subscription messages */ },
+    [&]() { /* onDisconnected */ },
+    [](const char*, std::size_t) { /* onData: leave empty if only draining */ },
+    [](std::string err) { /* onError */ }
+);
+
+uint64_t cursor = ws->initial_reading_index(); // initialize before the first drain_data() call
+ws->open();
+
+while (Websocket::is_running()) {
+    ws->drain_data(cursor, [&](const char* data, std::size_t size) {
+        // Process the message on this thread
+    });
+}
+```
+
+> **Note:** Using both `onData` and `drain_data()` results in each message being
+> processed twice — choose one or the other. `drain_data()` is thread-safe and can be
+> called concurrently with the WebSocket's own callbacks.
+
+See [`examples/websocket_reading_from_different_thread.cpp`](examples/websocket_reading_from_different_thread.cpp) for a complete example.
 
 ### HttpStream Class
 

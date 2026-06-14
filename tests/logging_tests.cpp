@@ -106,4 +106,27 @@ TEST(LoggingTest, PlainStringNoArgs) {
     EXPECT_EQ(captured, "plain message");
 }
 
+TEST(LoggingTest, DisabledMacrosDoNotEvaluateArguments) {
+    std::string captured;
+    int evaluation_count = 0;
+    auto expensive_message = [&]() -> std::string {
+        ++evaluation_count;
+        return std::format("other format can't avoid {}", "YEAH");
+    };
+
+    set_log_handler([&](LogLevel, std::string_view format_text, std::format_args args) {
+        // With no args, format_text is the complete message
+        captured.append(std::vformat(format_text, args));
+    }, []() { return LogLevel::Debug; });
+
+    LOG_DEBUG("Some format {}", expensive_message());
+    LOG_TRACE("Some format {}", expensive_message());
+    LOG_INFO("Some format {}", expensive_message());
+
+    clear_log_handler();
+
+    EXPECT_EQ(evaluation_count, 2);
+    EXPECT_EQ(captured, "Some format other format can't avoid YEAHSome format other format can't avoid YEAH");
+}
+
 } // namespace slick::net

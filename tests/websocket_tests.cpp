@@ -1895,7 +1895,7 @@ TEST_F(WebsocketTest, Reconnect_FromWithinErrorCallback_Connects) {
            "Possible deadlock: callback blocked the service thread.";
     EXPECT_GE(error_count->load(), 2);
 
-    (*ws_holder)->reset_callbacks(); // break circular ref before close
+    (*ws_holder)->detach(); // break circular ref before close
     (*ws_holder)->close();
 }
 
@@ -2200,6 +2200,181 @@ TEST_F(WebsocketTest, Reconnect_SameObject_CallbacksFireInCorrectOrder) {
         EXPECT_LT(connected_pos, disconnected_pos)
             << "Session " << session << ": disconnected fired before connected";
     }
+}
+
+// ============== Read-buffer ownership handoff tests (rapid reconnect) ==============
+// The shared read stream buffer is single-producer: a new session must not touch it
+// until the previous session's read loop has fully terminated. These tests exercise
+// open() while the previous session is still DISCONNECTING.
+
+// open() during DISCONNECTING defers the new session until the old one releases the
+// buffer, reports CONNECTING during the window, and suppresses the old session's
+// disconnect callback.
+TEST_F(WebsocketTest, Reconnect_SameObject_OpenWhileDisconnecting_DefersAndConnects) {
+    EventSynchronizer connected;
+    std::atomic<int> disconnect_count{0};
+    ReceivedMessages received;
+
+    Websocket ws(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { connected.notify(); },
+        [&]() { disconnect_count++; },
+        [&](const char* d, std::size_t l) { received.add(d, l); },
+        [&](std::string&&) {}
+    );
+
+    ws.open();
+    connected.wait_for(std::chrono::milliseconds(10000));
+    if (!connected.is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+
+    connected.reset();
+    ws.close();
+    ws.open(); // old session still DISCONNECTING - the new session is deferred
+
+    auto st = ws.status();
+    EXPECT_TRUE(st == Websocket::Status::CONNECTING || st == Websocket::Status::CONNECTED)
+        << "status() should read CONNECTING while the deferred open waits";
+
+    connected.wait_for(std::chrono::milliseconds(15000));
+    ASSERT_TRUE(connected.is_triggered()) << "Deferred open never connected";
+
+    // The replaced session was detached: its disconnect callback must be suppressed.
+    EXPECT_EQ(disconnect_count.load(), 0)
+        << "Suppressed session's onDisconnected leaked through";
+
+    const std::string msg = "deferred-open-check";
+    ws.send(msg.data(), msg.size());
+    received.sync.wait_for(std::chrono::milliseconds(5000));
+    EXPECT_TRUE(received.sync.is_triggered()) << "No echo on the deferred session";
+    {
+        std::lock_guard<std::mutex> lk(received.mtx);
+        ASSERT_FALSE(received.msgs.empty());
+        EXPECT_EQ(received.msgs[0], msg);
+    }
+    ws.close();
+}
+
+// Rapid close()+open() while echoes from the old session may still be in flight:
+// every record published to the stream buffer must be byte-identical to a sent
+// payload - no torn records, no bytes interleaved between the two sessions.
+TEST_F(WebsocketTest, Reconnect_SameObject_NoDataCorruption_AcrossRapidReconnect) {
+    EventSynchronizer connected;
+    std::atomic<int> session{0};
+    ReceivedMessages received_b;
+
+    Websocket ws(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { connected.notify(); },
+        [&]() {},
+        [&](const char* d, std::size_t l) { if (session.load() == 1) received_b.add(d, l); },
+        [&](std::string&&) {}
+    );
+
+    uint64_t cursor = ws.initial_reading_index();
+
+    std::vector<std::string> payloads_a, payloads_b;
+    for (int i = 0; i < 8; ++i) {
+        payloads_a.push_back("A-" + std::to_string(i) + "-" + std::string(512, 'a'));
+        payloads_b.push_back("B-" + std::to_string(i) + "-" + std::string(512, 'b'));
+    }
+
+    ws.open();
+    connected.wait_for(std::chrono::milliseconds(10000));
+    if (!connected.is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+
+    for (const auto& p : payloads_a) {
+        ws.send(p.data(), p.size());
+    }
+    // Let some echoes arrive / be mid-flight when we reconnect.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    connected.reset();
+    session.store(1);
+    ws.close();
+    ws.open(); // rapid reconnect while old-session echoes may still be arriving
+
+    connected.wait_for(std::chrono::milliseconds(15000));
+    ASSERT_TRUE(connected.is_triggered()) << "Failed to reconnect";
+
+    for (const auto& p : payloads_b) {
+        ws.send(p.data(), p.size());
+    }
+    bool got_all_b = wait_for_condition(
+        [&]() { return received_b.count.load() >= static_cast<int>(payloads_b.size()); },
+        std::chrono::milliseconds(10000));
+    EXPECT_TRUE(got_all_b) << "Not all session-B echoes received: " << received_b.count.load();
+
+    // Drain everything published to the shared stream buffer across both sessions.
+    std::vector<std::string> drained;
+    auto contains = [](const std::vector<std::string>& v, const std::string& s) {
+        return std::find(v.begin(), v.end(), s) != v.end();
+    };
+    wait_for_condition(
+        [&]() {
+            ws.drain_data(cursor, [&](const char* d, std::size_t l) {
+                drained.emplace_back(d, l);
+            }, 1000);
+            for (const auto& p : payloads_b) {
+                if (!contains(drained, p)) return false;
+            }
+            return true;
+        },
+        std::chrono::milliseconds(5000));
+
+    for (const auto& rec : drained) {
+        EXPECT_TRUE(contains(payloads_a, rec) || contains(payloads_b, rec))
+            << "Corrupted record published to the stream buffer (len=" << rec.size()
+            << "): " << rec.substr(0, 64);
+    }
+    for (const auto& p : payloads_b) {
+        EXPECT_TRUE(contains(drained, p)) << "Missing session-B record: " << p.substr(0, 16);
+    }
+    ws.close();
+}
+
+// close() after open() on a still-disconnecting session cancels the pending deferred
+// open; the websocket settles at DISCONNECTED and the handoff chain stays functional.
+TEST_F(WebsocketTest, Reconnect_SameObject_CloseCancelsPendingDeferredOpen) {
+    EventSynchronizer connected;
+
+    Websocket ws(
+        "wss://ws.postman-echo.com/raw",
+        [&]() { connected.notify(); },
+        [&]() {},
+        [&](const char*, std::size_t) {},
+        [&](std::string&&) {}
+    );
+
+    ws.open();
+    connected.wait_for(std::chrono::milliseconds(10000));
+    if (!connected.is_triggered()) {
+        GTEST_SKIP() << "Could not connect to echo server - network unavailable";
+    }
+
+    connected.reset();
+    ws.close();
+    ws.open();  // deferred behind the closing session
+    ws.close(); // cancels the pending deferred open
+
+    bool settled = wait_for_condition(
+        [&]() { return ws.status() == Websocket::Status::DISCONNECTED; },
+        std::chrono::milliseconds(10000));
+    EXPECT_TRUE(settled) << "Did not settle at DISCONNECTED after cancelling deferred open";
+    EXPECT_FALSE(connected.is_triggered()) << "Cancelled deferred open still connected";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    EXPECT_EQ(ws.status(), Websocket::Status::DISCONNECTED)
+        << "Cancelled deferred open connected after settling";
+
+    // The handoff chain must not be wedged: a fresh open() still connects.
+    ws.open();
+    connected.wait_for(std::chrono::milliseconds(15000));
+    EXPECT_TRUE(connected.is_triggered()) << "open() after cancelled deferred open never connected";
+    ws.close();
 }
 
 } // namespace slick::net

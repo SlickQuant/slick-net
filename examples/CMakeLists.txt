@@ -25,6 +25,10 @@ add_executable(websocket_client_example websocket_client.cpp)
 target_include_directories(websocket_client_example PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(websocket_client_example PRIVATE slick::net slick::logger nlohmann_json::nlohmann_json)
 
+add_executable(websocket_reading_from_different_thread_example websocket_reading_from_different_thread.cpp)
+target_include_directories(websocket_reading_from_different_thread_example PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(websocket_reading_from_different_thread_example PRIVATE slick::net slick::logger nlohmann_json::nlohmann_json)
+
 add_executable(http_client_example http_client.cpp)
 target_include_directories(http_client_example PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(http_client_example PRIVATE slick::net slick::logger nlohmann_json::nlohmann_json)

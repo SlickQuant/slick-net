@@ -15,7 +15,7 @@ if (LINK_STATICALLY)
 endif()
 
 project(slick-net
-    VERSION 2.1.0
+    VERSION 3.0.0
     LANGUAGES CXX
 )
 
@@ -40,18 +40,33 @@ endif()
 find_package(slick-queue 1.2.2 CONFIG QUIET)
 if (NOT slick-queue_FOUND)
     message(STATUS "Fetching slick-queue...")
-
     include(FetchContent)
     # Disable tests for slick-queue
     set(BUILD_SLICK_QUEUE_TESTS OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         slick-queue
         GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
-        GIT_TAG v1.4.1 # See https://github.com/SlickQuant/slick-net/releases for latest version
+        GIT_TAG v1.4.1 # See https://github.com/SlickQuant/slick-queue/releases for latest version
     )
     FetchContent_MakeAvailable(slick-queue)
 else()
     message(STATUS "slick-queue: ${slick-queue_VERSION}")
+endif()
+
+find_package(slick-dynamic-buffer CONFIG QUIET)
+if (NOT slick-dynamic-buffer_FOUND)
+    message(STATUS "Fetching slick-dynamic-buffer...")
+    include(FetchContent)
+    # Disable tests for slick-dynamic-buffer
+    set(BUILD_SLICK_DYNAMIC_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        slick-dynamic-buffer
+        GIT_REPOSITORY https://github.com/SlickQuant/slick-dynamic-buffer.git
+        GIT_TAG v1.0.0 # See https://github.com/SlickQuant/slick-dynamic-buffer/releases for latest version
+    )
+    FetchContent_MakeAvailable(slick-dynamic-buffer)
+else()
+    message(STATUS "slick-dynamic-buffer: ${slick-dynamic-buffer_VERSION}")
 endif()
 
 message(STATUS "OpenSSL: ${OPENSSL_INCLUDE_DIR}")
@@ -73,7 +88,7 @@ target_include_directories(slick-net PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(slick-net PUBLIC slick::queue Boost::asio Boost::beast Boost::context OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(slick-net PUBLIC slick::queue slick::dynamic_buffer Boost::asio Boost::beast Boost::context OpenSSL::SSL OpenSSL::Crypto)
 set_target_properties(slick-net PROPERTIES EXPORT_NAME net)
 
 
