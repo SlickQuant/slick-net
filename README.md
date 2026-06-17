@@ -135,7 +135,7 @@ checks `should_log()` before evaluating its arguments.
 using namespace slick::net;
 
 int main() {
-    Websocket ws(
+    Websocket<> ws(
         "wss://ws.postman-echo.com/raw",           // WebSocket URL
         []() {                                // onConnected
             std::cout << "Connected!\n";
