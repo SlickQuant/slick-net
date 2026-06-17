@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 
-option(LINK_STATICALLY "Link statically" OFF)
+option(LINK_STATICALLY "Link Boost and OpenSSL statically" OFF)
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(BUILD_SLICK_NET_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
+option(BUILD_SLICK_NET_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
+
 if (LINK_STATICALLY)
     if (MSVC)
         set(VCPKG_TARGET_TRIPLET x64-windows-static)
@@ -37,7 +41,7 @@ if (slick-shm_FOUND)
     message(STATUS "slick-shm: ${slick-shm_VERSION}")
 endif()
 
-find_package(slick-queue 1.2.2 CONFIG QUIET)
+find_package(slick-queue 1.5.0 CONFIG QUIET)
 if (NOT slick-queue_FOUND)
     message(STATUS "Fetching slick-queue...")
     include(FetchContent)
@@ -46,27 +50,56 @@ if (NOT slick-queue_FOUND)
     FetchContent_Declare(
         slick-queue
         GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
-        GIT_TAG v1.4.1 # See https://github.com/SlickQuant/slick-queue/releases for latest version
+        GIT_TAG v1.5.0 # See https://github.com/SlickQuant/slick-queue/releases for latest version
     )
     FetchContent_MakeAvailable(slick-queue)
 else()
-    message(STATUS "slick-queue: ${slick-queue_VERSION}")
+    message(STATUS "Found slick-queue: ${slick-queue_VERSION}")
 endif()
 
-find_package(slick-dynamic-buffer CONFIG QUIET)
+find_package(slick-stream-buffer 1.0.5 CONFIG QUIET)
+if (NOT slick-stream-buffer_FOUND)
+    message(STATUS "Fetching slick-stream-buffer...")
+    include(FetchContent)
+    set(BUILD_SLICK_STREAM_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        slick-stream-buffer
+        GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer.git
+        GIT_TAG v1.0.5
+    )
+    FetchContent_MakeAvailable(slick-stream-buffer)
+else()
+    message(STATUS "Found slick-stream-buffer: ${slick-stream-buffer_VERSION}")
+endif()
+
+find_package(slick-stream-buffer-multiplexer 1.0.1 CONFIG QUIET)
+if (NOT slick-stream-buffer-multiplexer_FOUND)
+    message(STATUS "Fetching slick-stream-buffer-multiplexer...")
+    include(FetchContent)
+    set(BUILD_SLICK_STREAM_BUFFER_MULTIPLEXER_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        slick-stream-buffer-multiplexer
+        GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer-multiplexer.git
+        GIT_TAG v1.0.1
+    )
+    FetchContent_MakeAvailable(slick-stream-buffer-multiplexer)
+else()
+    message(STATUS "Found slick-stream-buffer-multiplexer: ${slick-stream-buffer-multiplexer_VERSION}")
+endif()
+
+find_package(slick-dynamic-buffer 1.0.1 CONFIG QUIET)
 if (NOT slick-dynamic-buffer_FOUND)
     message(STATUS "Fetching slick-dynamic-buffer...")
     include(FetchContent)
-    # Disable tests for slick-dynamic-buffer
     set(BUILD_SLICK_DYNAMIC_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         slick-dynamic-buffer
         GIT_REPOSITORY https://github.com/SlickQuant/slick-dynamic-buffer.git
-        GIT_TAG v1.0.0 # See https://github.com/SlickQuant/slick-dynamic-buffer/releases for latest version
+        GIT_TAG v1.0.1
     )
     FetchContent_MakeAvailable(slick-dynamic-buffer)
 else()
-    message(STATUS "slick-dynamic-buffer: ${slick-dynamic-buffer_VERSION}")
+    message(STATUS "Found slick-dynamic-buffer: ${slick-dynamic-buffer_VERSION}")
 endif()
 
 message(STATUS "OpenSSL: ${OPENSSL_INCLUDE_DIR}")
@@ -76,7 +109,8 @@ add_library(slick-net STATIC
     src/http.cpp
     src/http_stream.cpp
     src/websocket.cpp
-    src/websocket_session.cpp
+    src/websocket_stream_buffer.cpp
+    src/websocket_stream_buffer_multiplexer.cpp
     src/logging.cpp
 )
 add_library(slick::net ALIAS slick-net)
@@ -88,7 +122,17 @@ target_include_directories(slick-net PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(slick-net PUBLIC slick::queue slick::dynamic_buffer Boost::asio Boost::beast Boost::context OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(slick-net PUBLIC
+    slick::queue
+    slick::stream_buffer
+    slick::stream_buffer_multiplexer
+    slick::dynamic_buffer
+    Boost::asio
+    Boost::beast
+    Boost::context
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
 set_target_properties(slick-net PROPERTIES EXPORT_NAME net)
 
 
@@ -109,7 +153,6 @@ else()
     endif()
 endif()
 
-option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 if(ENABLE_ASAN)
   if(MSVC)
     # MSVC AddressSanitizer (requires Visual Studio 2022 17.7+)
@@ -133,7 +176,6 @@ if(ENABLE_ASAN)
   endif()
 endif()
 
-option(BUILD_SLICK_NET_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 if (BUILD_SLICK_NET_TESTS)
     message(STATUS "Building slick-net tests")
     enable_testing()
@@ -142,7 +184,6 @@ else()
     message(STATUS "Skipping slick-net tests")
 endif()
 
-option(BUILD_SLICK_NET_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 if(BUILD_SLICK_NET_EXAMPLES)
     message(STATUS "Building slick::net examples")
     add_subdirectory(examples)

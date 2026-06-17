@@ -158,7 +158,7 @@ int main() {
     ws.send(message.data(), message.size());
     
     // Keep the application running
-    while(Websocket::is_running()) {
+    while(Websocket<>::is_running()) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     
@@ -176,8 +176,8 @@ using namespace slick::net;
 using json = nlohmann::json;
 
 int main() {
-    std::shared_ptr<Websocket> ws;
-    ws = std::make_shared<Websocket>(
+    std::shared_ptr<Websocket<>> ws;
+    ws = std::make_shared<Websocket<>>(
         "wss://advanced-trade-ws.coinbase.com",
         [&]() { 
             std::cout << "Connected to Coinbase\n";
@@ -205,7 +205,7 @@ int main() {
     
     // Ctrl + C to exit
     // Keep running
-    while(Websocket::is_running()) {
+    while(Websocket<>::is_running()) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     
@@ -227,7 +227,9 @@ cmake --build .
 Run examples:
 ```bash
 ./examples/websocket_client_example
-./examples/websocket_reading_from_different_thread_example
+./examples/websocket_with_stream_buffer_example
+./examples/websocket_with_stream_buffer_multiplexer_example
+./examples/websocket_with_custom_buffer_example
 ./examples/http_client_example
 ./examples/http_stream_client_example
 ./examples/http_awaitable_client_example
@@ -334,19 +336,38 @@ int main() {
 
 ### Websocket Class
 
-**Constructor:**
+`Websocket` is a class template parameterized on the read buffer type. The default is
+`boost::beast::flat_buffer`, which is backward-compatible with existing code. The
+library also explicitly instantiates the slick stream-buffer backends below, so users
+can include `<slick/net/websocket.hpp>` instead of the implementation header.
+
+**Constructor (1) — default buffer:**
 ```cpp
-Websocket(
+template<typename BufferT = boost::beast::flat_buffer>
+Websocket<BufferT>(
     std::string url,
     std::function<void()> onConnected,
     std::function<void()> onDisconnected,
     std::function<void(const char*, std::size_t)> onData,
     std::function<void(std::string&&)> onError,
-    uint32_t write_buffer_size = 1u << 20,   // 1 MB write buffer
-    uint32_t read_buffer_size = 1u << 26,    // 64 MB reading buffer
-    uint32_t read_record_size = 1u << 16,    // 64K message records
-    std::string read_buffer_shm_name = ""    // optional shared-memory name for the read buffer
-)
+    uint32_t write_buffer_size = 1u << 20   // 1 MiB write buffer
+);
+```
+
+**Constructor (2) — shared backend (slick dynamic_buffer):**
+```cpp
+template<typename BufferT>
+template<typename BackendT>
+    requires std::constructible_from<BufferT, std::shared_ptr<BackendT>>
+Websocket<BufferT>(
+    std::string url,
+    std::function<void()> onConnected,
+    std::function<void()> onDisconnected,
+    std::function<void(const char*, std::size_t)> onData,
+    std::function<void(std::string&&)> onError,
+    std::shared_ptr<BackendT> r_backend,
+    uint32_t write_buffer_size = 1u << 20
+);
 ```
 
 **Methods:**
@@ -354,8 +375,6 @@ Websocket(
 - `bool close()` - Close the WebSocket connection
 - `void send(const char* buffer, size_t len, bool is_binary = false, bool suppress_log = false)` - Send data through the WebSocket
 - `void send_binary_data(const char* buffer, size_t len, bool suppress_log = false)` - Send binary data through the WebSocket
-- `bool drain_data(uint64_t& cursor, std::function<void(const char*, std::size_t)>&& on_data, std::size_t max_num_data = 100)` - Drain received messages from a caller-owned thread (see [Reading from a different thread](#reading-from-a-different-thread) below)
-- `uint64_t initial_reading_index() const` - Starting cursor value for `drain_data()`
 - `Status status() const` - Get current connection status
 - `void detach()` - Suppress callbacks from this object's session (used internally during teardown/reconnect)
 - `static void shutdown()` - Shutdown all WebSocket services
@@ -374,7 +393,7 @@ The same `Websocket` object can be reused — call `open()` again after the conn
 ws.close();
 
 // Wait for the previous session to fully close
-while (ws.status() != Websocket::Status::DISCONNECTED) {
+while (ws.status() != Websocket<>::Status::DISCONNECTED) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -401,43 +420,120 @@ If you need a guaranteed `onDisconnected` for every session — for example, to 
 
 #### Deferred reconnect
 
-The internal read buffer is single-producer, so a same-object `open()` is deferred until
-the previous session's read loop has fully released it (normally ~1 round trip, bounded
-by the close timeout). `status()` reads `CONNECTING` during this window, and any partial
-data left over from the interrupted session is discarded before the new session starts
-reading.
+For shared-backend buffers (e.g. `slick::dynamic_buffer<T>`) the backend is
+single-producer, so a same-object `open()` is deferred until the previous session's
+read loop has fully released it (normally ~1 round trip, bounded by the close timeout).
+`status()` reads `CONNECTING` during this window, and any partial data left over from
+the interrupted session is discarded before the new session starts reading.
 
-### Reading from a different thread
+For `flat_buffer` (the default) each reconnect starts a fresh buffer immediately —
+no deferral is needed.
 
-By default, `onData` (and the other callbacks) run on the WebSocket's internal service
-thread. To process messages on your own thread instead, call `drain_data()` in a loop —
-it reads from a shared `slick::dynamic_buffer`/`slick::stream_buffer` populated by the
-service thread:
+### Custom Read Buffers (slick backends)
+
+Pass a `shared_ptr` to a slick backend to unlock zero-copy, lock-free streaming. Bytes
+received by the WebSocket are written directly into the slick ring; consumers read
+zero-copy without copying through the callback.
+
+Supported slick websocket buffer types are explicitly instantiated in `slick-net`, so
+application code only needs the public websocket header and the buffer type headers.
+
+#### stream_buffer (SPMC)
 
 ```cpp
-std::shared_ptr<Websocket> ws = std::make_shared<Websocket>(
-    "wss://advanced-trade-ws.coinbase.com",
-    [&]() { /* onConnected: send subscription messages */ },
-    [&]() { /* onDisconnected */ },
-    [](const char*, std::size_t) { /* onData: leave empty if only draining */ },
-    [](std::string err) { /* onError */ }
+#include <slick/net/websocket.hpp>
+#include <slick/dynamic_buffer.hpp>
+#include <slick/stream_buffer.hpp>
+
+// Shared backend — survives reconnects
+auto sb = std::make_shared<slick::stream_buffer>(1u << 26, 1u << 16); // 64 MiB / 64K records
+
+slick::net::Websocket<slick::dynamic_buffer<slick::stream_buffer>> ws(
+    "wss://ws.postman-echo.com/raw",
+    [&]() { /* connected */ },
+    [&]() { /* disconnected */ },
+    [](const char* data, std::size_t len) { /* data delivered via ring record */ },
+    [](std::string&&) { /* error */ },
+    sb
 );
 
-uint64_t cursor = ws->initial_reading_index(); // initialize before the first drain_data() call
-ws->open();
+ws.open();
 
-while (Websocket::is_running()) {
-    ws->drain_data(cursor, [&](const char* data, std::size_t size) {
-        // Process the message on this thread
-    });
+// Consumers read from the same ring zero-copy on any thread:
+uint64_t cursor = sb->initial_reading_index();
+while (true) {
+    auto [ptr, len] = sb->read(cursor);
+    if (ptr && len) {
+        // process ptr[0..len-1]
+    }
 }
 ```
 
-> **Note:** Using both `onData` and `drain_data()` results in each message being
-> processed twice — choose one or the other. `drain_data()` is thread-safe and can be
-> called concurrently with the WebSocket's own callbacks.
+#### Custom buffer types
 
-See [`examples/websocket_reading_from_different_thread.cpp`](examples/websocket_reading_from_different_thread.cpp) for a complete example.
+For custom buffer types, the compiler must see the template method definitions. Keep
+normal application files on `<slick/net/websocket.hpp>`, and add one explicit
+instantiation translation unit for the custom type:
+
+```cpp
+// websocket_my_buffer.cpp
+#include <my/buffer.hpp>
+#define SLICK_NET_WEBSOCKET_HEADER_ONLY
+#include <slick/net/websocket.hpp>
+
+template class slick::net::Websocket<my::buffer>;
+```
+
+If the custom websocket uses the shared-backend constructor template, explicitly
+instantiate that constructor too:
+
+```cpp
+template slick::net::Websocket<my::buffer_adapter>::Websocket(
+    std::string,
+    std::function<void()> &&,
+    std::function<void()> &&,
+    std::function<void(const char*, std::size_t)> &&,
+    std::function<void(std::string &&)> &&,
+    std::shared_ptr<my::backend>,
+    uint32_t);
+```
+
+Small applications can instead define `SLICK_NET_WEBSOCKET_HEADER_ONLY` before
+including `<slick/net/websocket.hpp>` in each translation unit that uses the custom
+type, trading compile time for simpler setup.
+
+#### producer_buffer (MPMC fan-in via stream_buffer_multiplexer)
+
+```cpp
+#include <slick/net/websocket.hpp>
+#include <slick/dynamic_buffer.hpp>
+#include <slick/stream_buffer_multiplexer.hpp>
+
+using PBuf = slick::stream_buffer_multiplexer::producer_buffer;
+
+slick::stream_buffer_multiplexer mux(256);
+auto pb = mux.add_producer(0, 1u << 26, 1u << 16);
+
+slick::net::Websocket<slick::dynamic_buffer<PBuf>> ws(
+    "wss://ws.postman-echo.com/raw",
+    [&]() { /* connected */ },
+    [&]() { /* disconnected */ },
+    [](const char* data, std::size_t len) { /* data from this producer */ },
+    [](std::string&&) { /* error */ },
+    pb
+);
+
+ws.open();
+
+// Multiplexer consumer reads all producers in arrival order:
+uint64_t cursor = 0;
+while (true) {
+    auto rec = mux.read(cursor);
+    if (rec) {
+        // rec.data, rec.length, rec.producer_id
+    }
+}
+```
 
 ### HttpStream Class
 

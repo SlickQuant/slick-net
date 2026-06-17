@@ -1,24 +1,53 @@
-# [v3.0.0] - 2026-06-12
+# [v3.0.0] - 2026-06-16
 
 ## Added
-- Shared-buffer WebSocket read path built on `slick::dynamic_buffer` / `slick::stream_buffer`.
-- Configurable WebSocket buffer sizing and optional shared-memory naming via the `Websocket` constructor.
-- `Websocket::drain_data()` and `Websocket::initial_reading_index()` for draining published messages from a caller-owned thread.
-- New example `websocket_reading_from_different_thread.cpp` showing service-thread callbacks plus caller-thread draining.
-- Additional same-object reconnect tests covering deferred reconnect while disconnecting, rapid reconnect buffer handoff, and cancellation of a pending deferred open.
+- `Websocket<BufferT>` is now a class template parameterized on the read-buffer
+  type. Default is `boost::beast::flat_buffer`, and the library explicitly
+  instantiates the supported slick stream-buffer backends.
+- New constructor overload accepting a `std::shared_ptr<BackendT>`:
+  ```cpp
+  Websocket<slick::dynamic_buffer<slick::stream_buffer>> ws(url, callbacks..., sb);
+  Websocket<slick::dynamic_buffer<producer_buffer>>      ws(url, callbacks..., pb);
+  ```
+  This allows `slick::dynamic_buffer<stream_buffer>` and
+  `slick::dynamic_buffer<stream_buffer_multiplexer::producer_buffer>` as read-buffer
+  backends for lock-free zero-copy streaming while keeping application code on the
+  public `<slick/net/websocket.hpp>` include.
+- Shared-backend reconnect: for slick dynamic-buffer types the same backend is
+  reused across `open()` cycles — records from all sessions accumulate in the ring.
+  For `flat_buffer` each reconnect starts a fresh buffer.
+- `slick_buffer_tests` — new test binary exercising the `stream_buffer` and
+  `producer_buffer` paths end-to-end (construction, data round-trip, reconnect).
+- Additional same-object reconnect tests covering deferred reconnect while
+  disconnecting, rapid reconnect buffer handoff, and cancellation of a pending
+  deferred open.
+- Custom buffer types can opt into template definitions by defining
+  `SLICK_NET_WEBSOCKET_HEADER_ONLY` before including `<slick/net/websocket.hpp>`.
+- `websocket_with_custom_buffer_example` demonstrates the custom-buffer opt-in path.
 
 ## Changed
 - **BREAKING:** `Websocket::reset_callbacks()` was replaced by `Websocket::detach()`.
-- `Websocket::open()` now defers a same-object reconnect until the previous session's read loop releases the shared read buffer.
-- `Websocket::close()` can now cancel a pending deferred `open()` before the new session starts.
-- `Websocket::send()` and `Websocket::send_binary_data()` now accept an optional `suppress_log` flag.
-- The packaged CMake dependency wiring now finds or fetches `slick-dynamic-buffer` for both source builds and installed-package consumers.
-- GoogleTest discovery now runs in `PRE_TEST` mode to avoid slow first-launch failures during the build step.
+- `Websocket::open()` now defers a same-object reconnect until the previous
+  session's read loop releases the shared backend (shared-buffer path only;
+  `flat_buffer` starts immediately).
+- `Websocket::close()` can now cancel a pending deferred `open()` before the new
+  session starts.
+- `Websocket::send()` and `Websocket::send_binary_data()` now accept an optional
+  `suppress_log` flag.
+- GoogleTest discovery now runs in `PRE_TEST` mode to avoid slow first-launch
+  failures during the build step.
 
 ## Fixed
-- Rapid same-object reconnect no longer allows overlapping producers to touch the shared read buffer.
-- Detached or superseded WebSocket sessions now suppress stale error and disconnect callbacks during teardown.
-- Partial read data from an interrupted session is discarded before the next session starts reading on the shared buffer.
+- Rapid same-object reconnect no longer allows overlapping producers to touch the
+  shared read buffer.
+- Detached or superseded WebSocket sessions now suppress stale error and disconnect
+  callbacks during teardown.
+- Partial read data from an interrupted session is discarded before the next session
+  starts reading on the shared buffer.
+- Queued sends made while a connection is still handshaking no longer repost
+  writes in a tight loop before the socket reaches `CONNECTED`.
+- URL parsing now handles normal short `host:port` forms such as `abc:9000`
+  instead of treating the colon as part of the host.
 
 # [v2.1.0] - 2026-06-04
 

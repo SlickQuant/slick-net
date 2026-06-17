@@ -28,11 +28,20 @@ target_link_libraries(http_tests PRIVATE slick::net GTest::gtest_main)
 add_executable(logging_tests logging_tests.cpp)
 target_link_libraries(logging_tests PRIVATE slick::net GTest::gtest_main)
 
+add_executable(slick_buffer_tests slick_buffer_websocket_tests.cpp)
+target_link_libraries(slick_buffer_tests PRIVATE slick::net GTest::gtest_main)
+target_include_directories(slick_buffer_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if (MSVC)
+    target_compile_options(slick_buffer_tests PRIVATE "/bigobj")
+endif()
+
+# ── test discovery ───────────────────────────────────────────────────────────
 # Discover tests at ctest time (PRE_TEST) instead of build time so a slow
 # first launch of a freshly linked exe (AV scan, DLL load) can't fail the build
 gtest_discover_tests(websocket_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 gtest_discover_tests(http_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 gtest_discover_tests(logging_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+gtest_discover_tests(slick_buffer_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 
 # Set test properties
 set_target_properties(websocket_tests PROPERTIES
@@ -44,5 +53,9 @@ set_target_properties(http_tests PROPERTIES
 )
 
 set_target_properties(logging_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+)
+
+set_target_properties(slick_buffer_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
 )

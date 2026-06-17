@@ -6,7 +6,7 @@ include(CMakeFindDependencyMacro)
 find_dependency(Boost CONFIG REQUIRED COMPONENTS beast context)
 find_dependency(OpenSSL CONFIG REQUIRED)
 
-find_package(slick-queue 1.2.2 CONFIG QUIET)
+find_package(slick-queue 1.5.0 CONFIG QUIET)
 if(NOT slick-queue_FOUND)
     message(STATUS "Fetching slick-queue...")
     include(FetchContent)
@@ -14,22 +14,47 @@ if(NOT slick-queue_FOUND)
     set(BUILD_SLICK_QUEUE_TESTS OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         slick-queue
-        GIT_REPOSITORY https://github.com/SlickQuant/slick_queue.git
-        GIT_TAG v1.2.2
+        GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
+        GIT_TAG v1.5.0
     )
     FetchContent_MakeAvailable(slick-queue)
 endif()
 
-find_package(slick-dynamic-buffer CONFIG QUIET)
+find_package(slick-stream-buffer 1.0.5 CONFIG QUIET)
+if (NOT slick-stream-buffer_FOUND)
+    message(STATUS "Fetching slick-stream-buffer...")
+    include(FetchContent)
+    set(BUILD_SLICK_STREAM_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        slick-stream-buffer
+        GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer.git
+        GIT_TAG v1.0.5
+    )
+    FetchContent_MakeAvailable(slick-stream-buffer)
+endif()
+
+find_package(slick-stream-buffer-multiplexer 1.0.1 CONFIG QUIET)
+if (NOT slick-stream-buffer-multiplexer_FOUND)
+    message(STATUS "Fetching slick-stream-buffer-multiplexer...")
+    include(FetchContent)
+    set(BUILD_SLICK_STREAM_BUFFER_MULTIPLEXER_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        slick-stream-buffer-multiplexer
+        GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer-multiplexer.git
+        GIT_TAG v1.0.1
+    )
+    FetchContent_MakeAvailable(slick-stream-buffer-multiplexer)
+endif()
+
+find_package(slick-dynamic-buffer 1.0.1 CONFIG QUIET)
 if (NOT slick-dynamic-buffer_FOUND)
     message(STATUS "Fetching slick-dynamic-buffer...")
     include(FetchContent)
-    # Disable tests for slick-dynamic-buffer
     set(BUILD_SLICK_DYNAMIC_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         slick-dynamic-buffer
         GIT_REPOSITORY https://github.com/SlickQuant/slick-dynamic-buffer.git
-        GIT_TAG v1.0.0 # See https://github.com/SlickQuant/slick-dynamic-buffer/releases for latest version
+        GIT_TAG v1.0.1 # See https://github.com/SlickQuant/slick-dynamic-buffer/releases for latest version
     )
     FetchContent_MakeAvailable(slick-dynamic-buffer)
 endif()

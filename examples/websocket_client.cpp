@@ -43,8 +43,8 @@ int main()
         })"_json,
     };
 
-    std::shared_ptr<slick::net::Websocket> ws;
-    ws = std::make_shared<slick::net::Websocket>(
+    std::shared_ptr<slick::net::Websocket<>> ws;
+    ws = std::make_shared<slick::net::Websocket<>>(
         // "wss://ws.postman-echo.com/raw",
         "wss://advanced-trade-ws.coinbase.com",
         [&](){ 
@@ -62,7 +62,7 @@ int main()
 
     // Ctrl-C to exit
 
-    while(Websocket::is_running())
+    while(Websocket<>::is_running())
     {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }

@@ -1,0 +1,19 @@
+root = true
+
+[*]
+end_of_line = lf
+insert_final_newline = true
+
+# 4-space indentation for all files
+[*.{py,js,ts,json}]
+indent_style = space
+indent_size = 4
+
+# 2-space indentation for markup
+[*.{html,css,md,yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# Trims trailing whitespace for all files except Makefiles
+[*.{cs,java,cpp,h}]
+trim_trailing_whitespace = true

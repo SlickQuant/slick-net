@@ -1,29 +1,84 @@
 #pragma once
 
+#include <boost/beast/core/flat_buffer.hpp>
+
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
-
-namespace slick {
-    class SlickStreamBuffer;
-}
+#include <type_traits>
 
 namespace slick::net {
 
+/**
+ * @brief WebSocket client templated on the read buffer type.
+ *
+ * @tparam BufferT  Supported DynamicBuffer_v1-compatible type. Defaults to
+ *                  `boost::beast::flat_buffer` for zero-dependency, backward-compatible
+ *                  behavior.
+ *
+ * The library explicitly instantiates these buffer types, so users only need
+ * to include `<slick/net/websocket.hpp>` plus the buffer type's own header:
+ *  - `boost::beast::flat_buffer` (default)
+ *  - `slick::dynamic_buffer<slick::stream_buffer>`
+ *  - `slick::dynamic_buffer<slick::stream_buffer_multiplexer::producer_buffer>`
+ *
+ * Additional buffer types need their template definitions visible in one
+ * translation unit. Define `SLICK_NET_WEBSOCKET_HEADER_ONLY` before including
+ * this header in that translation unit to opt into those definitions.
+ *
+ * For slick backends, use the `shared_ptr<BackendT>` constructor overload:
+ * @code
+ *   auto sb = std::make_shared<slick::stream_buffer>(1u<<26, 1u<<16);
+ *   Websocket<slick::dynamic_buffer<slick::stream_buffer>> ws(url, callbacks..., sb);
+ * @endcode
+ */
+template<typename BufferT = boost::beast::flat_buffer>
 class Websocket {
 public:
+    /**
+     * @brief Default constructor — only available when BufferT is default-constructible.
+     *
+     * Creates its own `shared_ptr<BufferT>` internally. Suitable for the default
+     * `boost::beast::flat_buffer` and any other default-constructible DynamicBuffer.
+     */
     explicit Websocket(
         std::string url,
         std::function<void()> &&onConnectedCallback,
         std::function<void()> &&onDiconnectedCallback,
         std::function<void(const char*, std::size_t)> &&onDataCallback,
         std::function<void(std::string &&err)> &&onErrorCallback,
-        uint32_t write_buffer_size = 1u << 20,    // 1 MB write buffer
-        uint32_t read_buffer_size = 1u << 26,     // 64 MB reading buffer
-        uint32_t read_record_size = 1u << 16,     // 64K message records
-        std::string read_buffer_shm_name = ""
+        uint32_t write_buffer_size = 1u << 20
+    ) requires std::default_initializable<BufferT>;
+
+    /**
+     * @brief Backend constructor — accepts a `shared_ptr<BackendT>` and constructs
+     *        `BufferT` from it in-place.
+     *
+     * Participates in overload resolution only when `BufferT` is constructible from
+     * `std::shared_ptr<BackendT>`.  Enables e.g.:
+     * @code
+     *   // stream_buffer
+     *   auto sb = std::make_shared<slick::stream_buffer>(1u<<26, 1u<<16);
+     *   Websocket<slick::dynamic_buffer<slick::stream_buffer>> ws(url, cbs..., sb);
+     *
+     *   // producer_buffer
+     *   auto pb = mux.add_producer(0, 1u<<26, 1u<<16);
+     *   Websocket<slick::dynamic_buffer<stream_buffer_multiplexer::producer_buffer>> ws(url, cbs..., pb);
+     * @endcode
+     */
+    template<typename BackendT>
+        requires std::constructible_from<BufferT, std::shared_ptr<BackendT>>
+    explicit Websocket(
+        std::string url,
+        std::function<void()> &&onConnectedCallback,
+        std::function<void()> &&onDiconnectedCallback,
+        std::function<void(const char*, std::size_t)> &&onDataCallback,
+        std::function<void(std::string &&err)> &&onErrorCallback,
+        std::shared_ptr<BackendT> r_backend,
+        uint32_t write_buffer_size = 1u << 20
     );
 
     ~Websocket();
@@ -43,10 +98,12 @@ public:
     // need a guaranteed disconnected notification for every session, wait for
     // status() == DISCONNECTED before calling open() again.
     //
-    // The internal read buffer is single-producer, so the new session is
-    // deferred until the previous session's read loop has fully terminated
-    // and released the buffer (normally ~1 round trip; bounded by the close
-    // timeout). status() reads CONNECTING during this window.
+    // For shared-backend buffers (e.g. slick::dynamic_buffer<T>) the new session
+    // is deferred until the previous session's read loop has fully terminated
+    // and released the shared backend. status() reads CONNECTING during this window.
+    //
+    // For flat_buffer and other non-shared buffers each reconnect starts a fresh
+    // buffer immediately — no deferral is needed.
     //
     // Safe to call from within any callback (onConnected, onDisconnected,
     // onData, onError) because the new connection is posted asynchronously
@@ -57,16 +114,6 @@ public:
     void send(const char* buffer, std::size_t len, bool is_binary = false, bool suppress_log = false);
     void send_binary_data(const char* buffer, std::size_t len, bool suppress_log = false);
     static void shutdown();
-
-    /**
-     * @brief The callbacks passed in constructor are invoked on the websocket service thread. This function allows the caller to drain incoming messages onto their own thread and process them there.
-     * @param cursor A reference to a cursor that tracks the position in the data queue. The caller should initialize it to 0 or initial_reading_index().
-     * @param on_data The callback to invoke for each message.
-     * @param max_num_data Maximum number of messages to drain in one iteration. This is to prevent starvation of the calling thread if the on_data callback is slow.
-     * @return true if any data was drained, false if no data is available to drain.
-     * @note This function is thread-safe and can be called concurrently with the websocket callbacks. The caller should know that using onDataCallback and drain_data will result in messages being processed twice.
-     */
-    bool drain_data(uint64_t &cursor, std::function<void(const char*, std::size_t)> &&on_data, std::size_t max_num_data = 100);
 
     enum class Status : std::uint8_t {
         CONNECTING,
@@ -81,8 +128,6 @@ public:
 
     void detach();
 
-    uint64_t initial_reading_index() const noexcept;
-
 private:
     struct Impl;
     std::string url_;
@@ -92,7 +137,14 @@ private:
     std::function<void(std::string &&err)> on_error_;
     std::shared_ptr<Impl> impl_;
     size_t write_buffer_size_;
-    std::shared_ptr<slick::SlickStreamBuffer> r_stream_buffer_;
+    std::shared_ptr<BufferT> r_buffer_;
 };
 
+// Suppress implicit instantiation in user TUs — the library provides the definition.
+extern template class Websocket<boost::beast::flat_buffer>;
+
 } // namespace slick::net
+
+#ifdef SLICK_NET_WEBSOCKET_HEADER_ONLY
+#include <slick/net/detail/websocket_impl.hpp>
+#endif
