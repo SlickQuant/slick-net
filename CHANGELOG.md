@@ -1,3 +1,8 @@
+# [Unreleased]
+
+## Changed
+- bump min cmake version to 3.21 required by PROJECT_IS_TOP_LEVEL
+
 # [v3.0.0] - 2026-06-16
 
 ## Added
