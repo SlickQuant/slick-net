@@ -1,7 +1,8 @@
 # [Unreleased]
 
 ## Changed
-- bump min cmake version to 3.21 required by PROJECT_IS_TOP_LEVEL
+- Bump min cmake version to 3.21 required by PROJECT_IS_TOP_LEVEL
+- Refactor CMake configuration: streamline dependency checks and remove redundant fetch logic for slick-queue and slick-stream-buffer
 
 # [v3.0.0] - 2026-06-16
 
