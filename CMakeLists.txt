@@ -42,37 +42,6 @@ if (slick-shm_FOUND)
     message(STATUS "Found slick-shm ${slick-shm_VERSION}: ${slick-shm_DIR}")
 endif()
 
-find_package(slick-queue 1.5.0 CONFIG QUIET)
-if (NOT slick-queue_FOUND)
-    message(STATUS "Fetching slick-queue...")
-    include(FetchContent)
-    # Disable tests for slick-queue
-    set(BUILD_SLICK_QUEUE_TESTS OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        slick-queue
-        GIT_REPOSITORY https://github.com/SlickQuant/slick-queue.git
-        GIT_TAG v1.5.0 # See https://github.com/SlickQuant/slick-queue/releases for latest version
-    )
-    FetchContent_MakeAvailable(slick-queue)
-else()
-    message(STATUS "Found slick-queue ${slick-queue_VERSION}: ${slick-queue_DIR}")
-endif()
-
-find_package(slick-stream-buffer 1.0.5 CONFIG QUIET)
-if (NOT slick-stream-buffer_FOUND)
-    message(STATUS "Fetching slick-stream-buffer...")
-    include(FetchContent)
-    set(BUILD_SLICK_STREAM_BUFFER_TESTS OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(
-        slick-stream-buffer
-        GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer.git
-        GIT_TAG v1.0.5
-    )
-    FetchContent_MakeAvailable(slick-stream-buffer)
-else()
-    message(STATUS "Found slick-stream-buffer ${slick-stream-buffer_VERSION}: ${slick-stream-buffer_DIR}")
-endif()
-
 find_package(slick-stream-buffer-multiplexer 1.0.1 CONFIG QUIET)
 if (NOT slick-stream-buffer-multiplexer_FOUND)
     message(STATUS "Fetching slick-stream-buffer-multiplexer...")
@@ -86,6 +55,18 @@ if (NOT slick-stream-buffer-multiplexer_FOUND)
     FetchContent_MakeAvailable(slick-stream-buffer-multiplexer)
 else()
     message(STATUS "Found slick-stream-buffer-multiplexer ${slick-stream-buffer-multiplexer_VERSION}: ${slick-stream-buffer-multiplexer_DIR}")
+endif()
+
+# slick-queue is a dependency of slick-stream-buffer-multiplexer
+find_package(slick-queue CONFIG QUIET)
+if (slick-queue_FOUND)
+    message(STATUS "Found slick-queue ${slick-queue_VERSION}: ${slick-queue_DIR}")
+endif()
+
+# slick-stream-buffer is a dependency of slick-stream-buffer-multiplexer
+find_package(slick-stream-buffer CONFIG QUIET)
+if (slick-stream-buffer_FOUND)
+    message(STATUS "Found slick-stream-buffer ${slick-stream-buffer_VERSION}: ${slick-stream-buffer_DIR}")
 endif()
 
 find_package(slick-dynamic-buffer 1.0.1 CONFIG QUIET)
