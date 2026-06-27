@@ -40,13 +40,11 @@ using tcp = boost::asio::ip::tcp;
 
 namespace slick::net::detail {
 
-extern asio::io_context ioc_;
-extern ssl::context ctx_;
-extern std::thread service_thread_;
-extern std::atomic_bool init_service_thread_;
-extern std::atomic_bool run_;
-
-void install_signal_handlers();
+asio::io_context& websocket_ioc() noexcept;
+ssl::context& websocket_ssl_context() noexcept;
+bool websocket_running() noexcept;
+void start_websocket_service();
+void stop_websocket_service();
 
 struct websocket_url_parts {
     std::string host;
@@ -255,10 +253,10 @@ Websocket<BufferT>::Impl::Impl(
 
     if (use_ssl_) {
         wss_ = std::make_unique<websocket::stream<ssl::stream<beast::tcp_stream>>>(
-            asio::make_strand(detail::ioc_), detail::ctx_);
+            asio::make_strand(detail::websocket_ioc()), detail::websocket_ssl_context());
     } else {
         ws_ = std::make_unique<websocket::stream<beast::tcp_stream>>(
-            asio::make_strand(detail::ioc_));
+            asio::make_strand(detail::websocket_ioc()));
     }
 }
 
@@ -292,7 +290,7 @@ void Websocket<BufferT>::Impl::open() {
         session_started_.store(true, std::memory_order_release);
     }
     LOG_INFO("Opening WebSocket {}", url_);
-    asio::co_spawn(detail::ioc_, do_ws_session(),
+    asio::co_spawn(detail::websocket_ioc(), do_ws_session(),
         [self = this->shared_from_this()](std::exception_ptr eptr) {
             std::string err;
             bool failed = false;
@@ -308,7 +306,7 @@ void Websocket<BufferT>::Impl::open() {
                 if (failed) {
                     self->close();
                     self->status_.store(Status::DISCONNECTED, std::memory_order_release);
-                    if (detail::run_.load(std::memory_order_relaxed) && !self->is_detached()) {
+                    if (detail::websocket_running() && !self->is_detached()) {
                         self->on_error_(std::move(err));
                         self->on_diconnected_();
                     }
@@ -316,7 +314,7 @@ void Websocket<BufferT>::Impl::open() {
                 return;
             }
             const auto prev = self->status_.exchange(Status::DISCONNECTED, std::memory_order_acq_rel);
-            if (detail::run_.load(std::memory_order_relaxed) && !self->is_detached()) {
+            if (detail::websocket_running() && !self->is_detached()) {
                 if (failed && prev != Status::DISCONNECTING) {
                     self->on_error_(std::move(err));
                 }
@@ -327,34 +325,7 @@ void Websocket<BufferT>::Impl::open() {
             self->release_buffer();
         });
 
-    auto init_service = detail::init_service_thread_.load(std::memory_order_relaxed);
-    if (detail::init_service_thread_.compare_exchange_strong(init_service, true,
-                                                             std::memory_order_acq_rel) && !init_service) {
-        detail::install_signal_handlers();
-        detail::run_.store(true, std::memory_order_release);
-        detail::service_thread_ = std::thread([]() {
-            LOG_INFO("Websocket service thread started.");
-            while (detail::run_.load(std::memory_order_relaxed)) {
-                try {
-                    if (detail::ioc_.stopped()) {
-                        detail::ioc_.restart();
-                    }
-                    detail::ioc_.run();
-                }
-                catch(const std::exception& e) {
-                    detail::ioc_.restart();
-                    LOG_ERROR("{}", e.what());
-                }
-            }
-
-            if (!detail::ioc_.stopped()) [[unlikely]] {
-                LOG_TRACE("call ioc_.stop at the end of run");
-                detail::ioc_.stop();
-            }
-            LOG_INFO("Websocket service thread exit");
-            detail::init_service_thread_.store(false, std::memory_order_release);
-        });
-    }
+    detail::start_websocket_service();
 }
 
 template<typename BufferT>
@@ -378,7 +349,7 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_ssl() {
                                             std::memory_order_acq_rel, std::memory_order_relaxed);
             co_return;
         }
-        tcp::resolver resolver(asio::make_strand(detail::ioc_));
+        tcp::resolver resolver(asio::make_strand(detail::websocket_ioc()));
         auto result = co_await resolver.async_resolve(host_, std::to_string(port_), asio::use_awaitable);
 
         if (!SSL_set_tlsext_host_name(wss_->next_layer().native_handle(), host_.c_str())) {
@@ -405,7 +376,7 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_ssl() {
 
         co_await wss_->async_handshake(host_header, path_, asio::use_awaitable);
 
-        if (!detail::run_.load(std::memory_order_relaxed) ||
+        if (!detail::websocket_running() ||
             open_cancelled_.load(std::memory_order_acquire) || is_detached()) [[unlikely]] {
             Status expected = Status::CONNECTING;
             status_.compare_exchange_strong(expected, Status::DISCONNECTED,
@@ -452,7 +423,7 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_plain() {
                                             std::memory_order_acq_rel, std::memory_order_relaxed);
             co_return;
         }
-        tcp::resolver resolver(asio::make_strand(detail::ioc_));
+        tcp::resolver resolver(asio::make_strand(detail::websocket_ioc()));
         auto result = co_await resolver.async_resolve(host_, std::to_string(port_), asio::use_awaitable);
 
         beast::get_lowest_layer(*ws_).expires_after(std::chrono::seconds(30));
@@ -469,7 +440,7 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_plain() {
 
         co_await ws_->async_handshake(host_header, path_, asio::use_awaitable);
 
-        if (!detail::run_.load(std::memory_order_relaxed) ||
+        if (!detail::websocket_running() ||
             open_cancelled_.load(std::memory_order_acquire) || is_detached()) [[unlikely]] {
             Status expected = Status::CONNECTING;
             status_.compare_exchange_strong(expected, Status::DISCONNECTED,
@@ -553,7 +524,7 @@ template<typename BufferT>
 void Websocket<BufferT>::Impl::on_write(beast::error_code ec, std::size_t bytes_transferred) {
     boost::ignore_unused(bytes_transferred);
     if(ec) {
-        if (detail::run_.load(std::memory_order_relaxed) &&
+        if (detail::websocket_running() &&
             status_.load(std::memory_order_relaxed) == Status::CONNECTED &&
             ec != beast::websocket::error::closed &&
             ec != asio::error::eof &&
@@ -574,7 +545,7 @@ void Websocket<BufferT>::Impl::on_write(beast::error_code ec, std::size_t bytes_
 template<typename BufferT>
 void Websocket<BufferT>::Impl::on_read(beast::error_code ec, std::size_t bytes_transferred) {
     if(ec) {
-        if (detail::run_.load(std::memory_order_relaxed) &&
+        if (detail::websocket_running() &&
             status_.load(std::memory_order_relaxed) == Status::CONNECTED &&
             ec != beast::websocket::error::closed &&
             ec != asio::error::eof &&
@@ -597,7 +568,7 @@ void Websocket<BufferT>::Impl::on_read(beast::error_code ec, std::size_t bytes_t
         return;
     }
 
-    if (detail::run_.load(std::memory_order_relaxed) &&
+    if (detail::websocket_running() &&
         status_.load(std::memory_order_relaxed) == Status::CONNECTED &&
         !is_detached()) {
         LOG_TRACE("<-- {}", std::string((const char*)r_buffer_->data().data(), bytes_transferred));
@@ -626,7 +597,7 @@ void Websocket<BufferT>::Impl::on_read(beast::error_code ec, std::size_t bytes_t
 
 template<typename BufferT>
 void Websocket<BufferT>::Impl::on_close(beast::error_code ec) {
-    if (ec && detail::run_.load(std::memory_order_relaxed) &&
+    if (ec && detail::websocket_running() &&
         ec != beast::websocket::error::closed &&
         ec != asio::error::eof &&
         ec != asio::error::operation_aborted &&
@@ -838,19 +809,12 @@ typename Websocket<BufferT>::Status Websocket<BufferT>::status() const noexcept 
 
 template<typename BufferT>
 bool Websocket<BufferT>::is_running() noexcept {
-    return detail::run_.load(std::memory_order_relaxed);
+    return detail::websocket_running();
 }
 
 template<typename BufferT>
 void Websocket<BufferT>::shutdown() {
-    if (detail::run_.load(std::memory_order_relaxed)) {
-        LOG_DEBUG("Shutting down WebSocket service thread.");
-        detail::run_.store(false, std::memory_order_release);
-        detail::ioc_.stop();
-        if (detail::service_thread_.joinable()) {
-            detail::service_thread_.join();
-        }
-    }
+    detail::stop_websocket_service();
 }
 
 template<typename BufferT>
