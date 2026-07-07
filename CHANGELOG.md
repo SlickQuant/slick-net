@@ -1,5 +1,15 @@
 # [Unreleased]
 
+## Added
+- Source-location capture in `LOG_*` macros: file name and line number are now forwarded to the log handler when `SLICK_NET_ENABLE_SOURCE_LOCATION=1` (default ON). Controlled via the new CMake option `SLICK_NET_ENABLE_SOURCE_LOCATION`.
+- `LogHandlerWithLocation` handler type — `void(LogLevel, uint32_t line, const char* file_name, bool is_static_file_name, const char* format_text, std::format_args)` — and `set_log_handler_with_location()` to register it.
+- `file_name_from_path()` constexpr helper that extracts the basename from `__FILE__` at compile time; used as fallback when the compiler does not provide `__FILE_NAME__`.
+
+## Changed
+- `log_message_internal` signature extended with `uint32_t line`, `const char* file_name`, and `bool is_static_file_name` parameters; the existing `set_log_handler(LogHandler)` path continues to work unchanged (location parameters are silently discarded by the compatibility shim).
+- Bumped slick-logger example dependency from v1.0.9 to v1.1.1 to match the new location-aware `log_to_sink_with_location` API.
+- `BUILD_SLICK_NET_TESTS` and `BUILD_SLICK_NET_EXAMPLES` CMake options moved to after `project()` so `${PROJECT_IS_TOP_LEVEL}` is available when their defaults are evaluated.
+
 ## Changed
 - Bump min cmake version to 3.21 required by PROJECT_IS_TOP_LEVEL
 - Refactor CMake configuration: streamline dependency checks and remove redundant fetch logic for slick-queue and slick-stream-buffer

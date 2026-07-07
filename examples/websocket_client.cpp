@@ -10,9 +10,16 @@ namespace {
 auto &logger = Logger::instance();
 void configure_slick_net_logging()
 {
-    set_log_handler([](slick::net::LogLevel level, const char* format_text,
-                       std::format_args args) {
-        logger.log(static_cast<slick::logger::LogLevel>(level), format_text, args);
+    set_log_handler_with_location([](slick::net::LogLevel level, uint32_t line, const char* file_name, bool is_static_file_name, const char* format_text, std::format_args args) {
+        if (file_name) {
+            logger.log_to_sink_with_location(
+                -1,
+                static_cast<slick::logger::LogLevel>(level),
+                file_name, line, !is_static_file_name,
+                format_text, args);
+        } else {
+            logger.log(static_cast<slick::logger::LogLevel>(level), format_text, args);
+        }
     });
 }
 
@@ -47,16 +54,16 @@ int main()
     ws = std::make_shared<slick::net::Websocket<>>(
         // "wss://ws.postman-echo.com/raw",
         "wss://advanced-trade-ws.coinbase.com",
-        [&](){ 
+        [&](){
             LOG_INFO("ws connected");
             for (const auto &req : requests) {
                 auto str_req = req.dump();
-                ws->send(str_req.data(), str_req.size()); 
+                ws->send(str_req.data(), str_req.size());
             }
         },                                                                                          // onConnected
         [](){ LOG_INFO("ws disconnected"); },                                                       // onDisconnected
-        [&](const char* data, size_t size){ LOG_INFO("onData: {}", std::string(data, size)); },   // onData
-        [&](std::string err){ LOG_ERROR("onError: {}", std::move(err)); ws->close(); }            // onError
+        [&](const char* data, size_t size){ LOG_INFO("onData: {}", std::string(data, size)); },     // onData
+        [&](std::string err){ LOG_ERROR("onError: {}", std::move(err)); ws->close(); }              // onError
     );
     ws->open();
 

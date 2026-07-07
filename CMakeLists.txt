@@ -2,8 +2,6 @@ cmake_minimum_required(VERSION 3.21)
 
 option(LINK_STATICALLY "Link Boost and OpenSSL statically" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
-option(BUILD_SLICK_NET_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
-option(BUILD_SLICK_NET_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 
 if (LINK_STATICALLY)
     if (MSVC)
@@ -19,12 +17,17 @@ if (LINK_STATICALLY)
 endif()
 
 project(slick-net
-    VERSION 3.0.0
+    VERSION 3.1.0
     LANGUAGES CXX
 )
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(BUILD_SLICK_NET_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
+option(BUILD_SLICK_NET_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
+option(SLICK_NET_ENABLE_SOURCE_LOCATION "Enable LOG_* macro source-location capture" ON)
+
 
 if (LINK_STATICALLY)
     set(Boost_USE_STATIC_LIBS ON)
@@ -117,6 +120,11 @@ target_link_libraries(slick-net PUBLIC
 )
 set_target_properties(slick-net PROPERTIES EXPORT_NAME net)
 
+if(SLICK_NET_ENABLE_SOURCE_LOCATION)
+    target_compile_definitions(slick-net PUBLIC SLICK_NET_ENABLE_SOURCE_LOCATION=1)
+else()
+    target_compile_definitions(slick-net PUBLIC SLICK_NET_ENABLE_SOURCE_LOCATION=0)
+endif()
 
 if (MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "-O2")
