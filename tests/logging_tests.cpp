@@ -173,7 +173,7 @@ TEST(LoggingTest, HandlerWithLocationNullFileNamePassedThrough) {
             captured_file = file_name;
         });
 
-    log_message(LogLevel::Info, static_cast<uint32_t>(0), nullptr, true, "msg");
+    log_message(LogLevel::Info, static_cast<uint32_t>(0), static_cast<const char*>(nullptr), true, "msg");
     clear_log_handler();
 
     EXPECT_EQ(captured_line, 0u);
