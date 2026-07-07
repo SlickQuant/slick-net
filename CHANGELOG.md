@@ -9,8 +9,6 @@
 - `log_message_internal` signature extended with `uint32_t line`, `const char* file_name`, and `bool is_static_file_name` parameters; the existing `set_log_handler(LogHandler)` path continues to work unchanged (location parameters are silently discarded by the compatibility shim).
 - Bumped slick-logger example dependency from v1.0.9 to v1.1.1 to match the new location-aware `log_to_sink_with_location` API.
 - `BUILD_SLICK_NET_TESTS` and `BUILD_SLICK_NET_EXAMPLES` CMake options moved to after `project()` so `${PROJECT_IS_TOP_LEVEL}` is available when their defaults are evaluated.
-
-## Changed
 - Bump min cmake version to 3.21 required by PROJECT_IS_TOP_LEVEL
 - Refactor CMake configuration: streamline dependency checks and remove redundant fetch logic for slick-queue and slick-stream-buffer
 - Refactor websocket service internals: move `ioc_`, `ctx_`, `run_`, `service_thread_`, and `init_service_thread_` from `extern` globals in `slick::net::detail` into anonymous-namespace locals in `websocket.cpp`; replace direct access with the accessor functions `websocket_ioc()`, `websocket_ssl_context()`, and `websocket_running()`, and the lifecycle functions `start_websocket_service()` / `stop_websocket_service()`. This hides internal state from the header and eliminates ODR-unsafe `extern` declarations.
