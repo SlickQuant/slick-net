@@ -1,4 +1,4 @@
-# [Unreleased]
+# [v3.1.0] - 2026-07-07
 
 ## Added
 - Source-location capture in `LOG_*` macros: file name and line number are now forwarded to the log handler when `SLICK_NET_ENABLE_SOURCE_LOCATION=1` (default ON). Controlled via the new CMake option `SLICK_NET_ENABLE_SOURCE_LOCATION`.
