@@ -92,6 +92,7 @@ message(STATUS "Beast ${boost_beast_VERSION}: ${boost_beast_DIR}")
 add_library(slick-net STATIC
     src/http.cpp
     src/http_stream.cpp
+    src/tls.cpp
     src/websocket.cpp
     src/websocket_stream_buffer.cpp
     src/websocket_stream_buffer_multiplexer.cpp
@@ -117,6 +118,10 @@ target_link_libraries(slick-net PUBLIC
     OpenSSL::SSL
     OpenSSL::Crypto
 )
+if (WIN32)
+    # Windows certificate store access for TLS trust roots
+    target_link_libraries(slick-net PRIVATE crypt32)
+endif()
 set_target_properties(slick-net PROPERTIES EXPORT_NAME net)
 
 if(SLICK_NET_ENABLE_SOURCE_LOCATION)

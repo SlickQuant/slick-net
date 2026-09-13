@@ -2,6 +2,7 @@
 
 #include <slick/net/websocket.hpp>
 #include <slick/net/logging.hpp>
+#include <slick/net/tls.hpp>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -20,7 +21,7 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
-#include <slick/queue.h>
+#include <slick/queue.hpp>
 
 #include <atomic>
 #include <csignal>
@@ -41,7 +42,6 @@ using tcp = boost::asio::ip::tcp;
 namespace slick::net::detail {
 
 asio::io_context& websocket_ioc() noexcept;
-ssl::context& websocket_ssl_context() noexcept;
 bool websocket_running() noexcept;
 void start_websocket_service();
 void stop_websocket_service();
@@ -212,7 +212,7 @@ private:
     std::function<void(const char*, std::size_t)> on_data_;
     std::function<void(std::string &&err)> on_error_;
     std::atomic<Status> status_{ Status::DISCONNECTED };
-    slick::SlickQueue<char> w_buffer_;
+    slick::queue<char> w_buffer_;
     std::shared_ptr<BufferT> r_buffer_;
     uint64_t w_cursor_{0};
     std::atomic_bool in_writting_{false};
@@ -253,7 +253,7 @@ Websocket<BufferT>::Impl::Impl(
 
     if (use_ssl_) {
         wss_ = std::make_unique<websocket::stream<ssl::stream<beast::tcp_stream>>>(
-            asio::make_strand(detail::websocket_ioc()), detail::websocket_ssl_context());
+            asio::make_strand(detail::websocket_ioc()), tls_context());
     } else {
         ws_ = std::make_unique<websocket::stream<beast::tcp_stream>>(
             asio::make_strand(detail::websocket_ioc()));
@@ -352,8 +352,8 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_ssl() {
         tcp::resolver resolver(asio::make_strand(detail::websocket_ioc()));
         auto result = co_await resolver.async_resolve(host_, std::to_string(port_), asio::use_awaitable);
 
-        if (!SSL_set_tlsext_host_name(wss_->next_layer().native_handle(), host_.c_str())) {
-            beast::error_code ec{static_cast<int>(::ERR_get_error()), asio::error::get_ssl_category()};
+        // Set SNI and the host name/IP the server certificate must match
+        if (auto ec = detail::set_tls_peer_host(wss_->next_layer().native_handle(), host_)) {
             throw beast::system_error{ec};
         }
 
@@ -364,7 +364,10 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_ssl() {
         const auto host_header = host_ + ':' + std::to_string(ep.port());
 
         beast::get_lowest_layer(*wss_).expires_after(std::chrono::seconds(30));
-        co_await wss_->next_layer().async_handshake(ssl::stream_base::client, asio::use_awaitable);
+        if (auto [ec] = co_await wss_->next_layer().async_handshake(
+                ssl::stream_base::client, asio::as_tuple(asio::use_awaitable)); ec) {
+            detail::throw_tls_handshake_error(wss_->next_layer().native_handle(), ec);
+        }
 
         beast::get_lowest_layer(*wss_).expires_never();
         wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));

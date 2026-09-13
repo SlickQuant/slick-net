@@ -12,7 +12,7 @@ A high-performance C++ HTTP/WebSocket client library built on Boost.Beast with f
 - **HTTP/HTTPS Client**: Full support for GET, POST, PUT, PATCH, and DELETE methods
 - **HTTP Streaming**: Support for Server-Sent Events (SSE) and chunked response streaming
 - **Asynchronous WebSocket Client**: Built on Boost.Asio coroutines for high-performance async operations
-- **SSL/TLS Support**: Native support for secure `https://` and `wss://` connections
+- **SSL/TLS Support**: Native support for secure `https://` and `wss://` connections with certificate and host name verification against the system trust roots
 - **Multiple Async APIs**: Synchronous, callback-based, and C++20 coroutine awaitable interfaces
 - **Cross-Platform**: Works on Windows, Linux, and macOS
 - **Static Library by Default**: Heavy networking implementation compiles once in `slick-net`
@@ -124,6 +124,36 @@ slick::net::clear_log_handler();
 
 **Macros:** `LOG_TRACE`, `LOG_DEBUG`, `LOG_INFO`, `LOG_WARN`, `LOG_ERROR`, `LOG_FATAL` — each
 checks `should_log()` before evaluating its arguments.
+
+### TLS Certificate Verification
+
+`Http`, `HttpStream` and `Websocket` share one TLS client context for `https://` and
+`wss://`. Every handshake verifies the server certificate chain and requires the
+certificate to match the URL's host name (or IP address); a failure is reported as
+`TLS handshake failed (<reason>)`, e.g. `hostname mismatch` or `self-signed certificate`.
+
+Trust roots are loaded on first use:
+
+| Condition | Trust roots |
+|---|---|
+| `SSL_CERT_FILE` or `SSL_CERT_DIR` set | Exactly those locations |
+| Windows | Windows `ROOT` certificate store + OpenSSL default paths |
+| Linux / macOS | OpenSSL default paths, or the OS CA bundle (e.g. `/etc/ssl/certs/ca-certificates.crt`, `/etc/ssl/cert.pem`) when OpenSSL's default bundle is missing |
+
+To trust a private CA, configure `slick::net::tls_context()` before opening connections
+(it must not be modified while handshakes are in progress):
+
+```cpp
+#include <slick/net/tls.hpp>
+
+slick::net::tls_context().load_verify_file("corp-root-ca.pem");
+// or from memory:
+slick::net::tls_context().add_certificate_authority(boost::asio::buffer(pem));
+```
+
+Setting `tls_context().set_verify_mode(boost::asio::ssl::verify_none)` disables both
+certificate and host name verification and exposes connections to man-in-the-middle
+interception — use it only for local testing.
 
 ## Usage
 

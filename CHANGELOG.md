@@ -1,3 +1,18 @@
+# [Unreleased]
+
+## Security
+- TLS certificate verification is now enforced for `https://` and `wss://`. `Http` and `HttpStream` previously used `verify_none`, and `Websocket` never enabled peer verification or loaded trust roots, leaving all TLS connections open to man-in-the-middle interception. Handshakes now verify the certificate chain against the system trust roots and require the certificate to match the URL host name or IP address.
+
+## Added
+- `slick::net::tls_context()` (`<slick/net/tls.hpp>`): the TLS client context shared by `Http`, `HttpStream` and `Websocket`, created lock-free on first use with `verify_peer` and the system trust roots (`SSL_CERT_FILE`/`SSL_CERT_DIR` when set, otherwise the Windows `ROOT` store or the OS CA bundle plus OpenSSL default paths). Use it to trust a private CA, e.g. `tls_context().load_verify_file(...)`.
+- `tls_tests` — hermetic tests against a local TLS server with runtime-generated certificates covering trusted, untrusted, host name mismatch and IP address mismatch handshakes for all three clients.
+
+## Changed
+- TLS handshake failures now throw/report `TLS handshake failed (<verification reason>)`.
+- SNI is no longer sent for IP-literal hosts (RFC 6066); IP hosts are verified against the certificate's iPAddress SANs.
+- Removed the internal `detail::websocket_ssl_context()` accessor in favor of `tls_context()`.
+- `slick-net` links `crypt32` on Windows.
+
 # [v3.1.0] - 2026-07-07
 
 ## Added

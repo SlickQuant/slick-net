@@ -2,7 +2,6 @@
 
 namespace {
     asio::io_context ioc_;
-    ssl::context ctx_{ssl::context::tlsv12_client};
     std::thread service_thread_;
     std::atomic_bool init_service_thread_{false};
     std::atomic_bool run_{false};
@@ -16,9 +15,6 @@ namespace slick::net::detail {
 
 asio::io_context& websocket_ioc() noexcept {
     return ioc_;
-}
-ssl::context& websocket_ssl_context() noexcept {
-    return ctx_;
 }
 
 bool websocket_running() noexcept {

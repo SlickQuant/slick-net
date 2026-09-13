@@ -1,5 +1,6 @@
 #include <slick/net/http.hpp>
 #include <slick/net/logging.hpp>
+#include <slick/net/tls.hpp>
 #include "utils.hpp"
 
 #include <memory>
@@ -36,13 +37,6 @@ namespace {
         bool service_running_ = false;
     };
     std::atomic<service_info> async_service_;
-
-    ssl::context ctx_ = []() {
-        ssl::context ctx{ssl::context::tlsv12_client};
-        // Verify the remote server's certificate
-        ctx.set_verify_mode(ssl::verify_none);
-        return ctx;
-    }();
 
     asio::awaitable<Http::Response> do_session_plain_awaitable(
         std::string host,
@@ -128,16 +122,11 @@ namespace {
     {
         auto executor = co_await asio::this_coro::executor;
         auto resolver = asio::ip::tcp::resolver{ executor };
-        auto stream   = ssl::stream<beast::tcp_stream>{ executor, ctx_ };
+        auto stream   = ssl::stream<beast::tcp_stream>{ executor, tls_context() };
 
-        // Set SNI Hostname (many hosts need this to handshake successfully)
-        if(!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str()))
-        {
-            beast::error_code ec{
-                static_cast<int>(::ERR_get_error()),
-                asio::error::get_ssl_category()};
-            // LOG_ERROR("Error setting SNI hostname: {}", ec.message());
-            co_return Http::Response{5000, std::format("Error setting SNI hostname: {}", ec.message())};
+        // Set SNI and the host name/IP the server certificate must match
+        if (auto ec = detail::set_tls_peer_host(stream.native_handle(), host)) {
+            co_return Http::Response{5000, std::format("Error setting TLS peer host: {}", ec.message())};
         }
 
         // Look up the domain name
@@ -152,8 +141,10 @@ namespace {
         // Set the timeout.
         beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(30));
 
-        // Perform the SSL handshake
-        co_await stream.async_handshake(ssl::stream_base::client);
+        // Perform the SSL handshake (verifies the certificate chain and peer host)
+        if (auto [ec] = co_await stream.async_handshake(ssl::stream_base::client, asio::as_tuple); ec) {
+            detail::throw_tls_handshake_error(stream.native_handle(), ec);
+        }
 
         // Set up an HTTP request message
         http::request<http::string_body> req{ method, target, version };
