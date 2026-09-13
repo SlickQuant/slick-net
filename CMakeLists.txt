@@ -28,7 +28,6 @@ option(BUILD_SLICK_NET_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 option(BUILD_SLICK_NET_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 option(SLICK_NET_ENABLE_SOURCE_LOCATION "Enable LOG_* macro source-location capture" ON)
 
-
 if (LINK_STATICALLY)
     set(Boost_USE_STATIC_LIBS ON)
     set(OPENSSL_USE_STATIC_LIBS TRUE)
@@ -40,12 +39,7 @@ endif()
 find_package(Boost CONFIG REQUIRED COMPONENTS beast context)
 find_package(OpenSSL CONFIG REQUIRED)
 
-find_package(slick-shm CONFIG QUIET)
-if (slick-shm_FOUND)
-    message(STATUS "Found slick-shm ${slick-shm_VERSION}: ${slick-shm_DIR}")
-endif()
-
-find_package(slick-stream-buffer-multiplexer 1.0.1 CONFIG QUIET)
+find_package(slick-stream-buffer-multiplexer 2.0.0 CONFIG QUIET)
 if (NOT slick-stream-buffer-multiplexer_FOUND)
     message(STATUS "Fetching slick-stream-buffer-multiplexer...")
     include(FetchContent)
@@ -53,7 +47,7 @@ if (NOT slick-stream-buffer-multiplexer_FOUND)
     FetchContent_Declare(
         slick-stream-buffer-multiplexer
         GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer-multiplexer.git
-        GIT_TAG v1.0.1
+        GIT_TAG v2.0.0
     )
     FetchContent_MakeAvailable(slick-stream-buffer-multiplexer)
 else()
@@ -66,13 +60,18 @@ if (slick-queue_FOUND)
     message(STATUS "Found slick-queue ${slick-queue_VERSION}: ${slick-queue_DIR}")
 endif()
 
+find_package(slick-shm CONFIG QUIET)
+if (slick-shm_FOUND)
+    message(STATUS "Found slick-shm ${slick-shm_VERSION}: ${slick-shm_DIR}")
+endif()
+
 # slick-stream-buffer is a dependency of slick-stream-buffer-multiplexer
 find_package(slick-stream-buffer CONFIG QUIET)
 if (slick-stream-buffer_FOUND)
     message(STATUS "Found slick-stream-buffer ${slick-stream-buffer_VERSION}: ${slick-stream-buffer_DIR}")
 endif()
 
-find_package(slick-dynamic-buffer 1.0.1 CONFIG QUIET)
+find_package(slick-dynamic-buffer 1.0.2 CONFIG QUIET)
 if (NOT slick-dynamic-buffer_FOUND)
     message(STATUS "Fetching slick-dynamic-buffer...")
     include(FetchContent)
@@ -80,7 +79,7 @@ if (NOT slick-dynamic-buffer_FOUND)
     FetchContent_Declare(
         slick-dynamic-buffer
         GIT_REPOSITORY https://github.com/SlickQuant/slick-dynamic-buffer.git
-        GIT_TAG v1.0.1
+        GIT_TAG v1.0.2
     )
     FetchContent_MakeAvailable(slick-dynamic-buffer)
 else()
