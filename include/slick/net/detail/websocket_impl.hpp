@@ -43,6 +43,8 @@ asio::io_context& websocket_ioc() noexcept;
 bool websocket_running() noexcept;
 void start_websocket_service();
 void stop_websocket_service();
+void set_websocket_busy_poll(bool enable) noexcept;
+bool websocket_busy_poll() noexcept;
 
 struct websocket_url_parts {
     std::string host;
@@ -816,6 +818,16 @@ bool Websocket<BufferT>::is_running() noexcept {
 template<typename BufferT>
 void Websocket<BufferT>::shutdown() {
     detail::stop_websocket_service();
+}
+
+template<typename BufferT>
+void Websocket<BufferT>::set_busy_poll(bool enable) noexcept {
+    detail::set_websocket_busy_poll(enable);
+}
+
+template<typename BufferT>
+bool Websocket<BufferT>::busy_poll() noexcept {
+    return detail::websocket_busy_poll();
 }
 
 template<typename BufferT>

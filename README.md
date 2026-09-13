@@ -448,12 +448,30 @@ Websocket<BufferT>(
 - `Status status() const` - Get current connection status
 - `void detach()` - Suppress callbacks from this object's session (used internally during teardown/reconnect)
 - `static void shutdown()` - Shutdown all WebSocket services
+- `static void set_busy_poll(bool enable)` - Switch the service thread between blocking and busy polling (see [Busy Polling](#busy-polling) below)
+- `static bool busy_poll()` - Whether the service thread busy-polls
 
 **Status Enum:**
 - `CONNECTING` - Connection in progress
 - `CONNECTED` - Connected and ready
 - `DISCONNECTING` - Disconnection in progress
 - `DISCONNECTED` - Disconnected
+
+### Busy Polling
+
+All `Websocket` instances share one service thread. By default it blocks in the OS while
+no I/O is ready, so an idle service uses no CPU. For latency-sensitive applications,
+busy polling keeps the thread spinning on the `io_context` instead, trading a fully used
+CPU core for avoiding kernel wake-ups on each message:
+
+```cpp
+slick::net::Websocket<>::set_busy_poll(true);   // spin a core
+// ...
+slick::net::Websocket<>::set_busy_poll(false);  // back to blocking
+```
+
+The setting is process-wide, lock-free, and takes effect immediately — before the first
+`open()` or while connections are active. It persists across `shutdown()`.
 
 ### Reconnect
 

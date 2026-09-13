@@ -22,6 +22,9 @@ include(GoogleTest)
 add_executable(websocket_tests websocket_tests.cpp)
 target_link_libraries(websocket_tests PRIVATE slick::net GTest::gtest_main)
 
+add_executable(websocket_service_tests websocket_service_tests.cpp)
+target_link_libraries(websocket_service_tests PRIVATE slick::net GTest::gtest_main)
+
 add_executable(http_tests http_tests.cpp)
 target_link_libraries(http_tests PRIVATE slick::net GTest::gtest_main)
 
@@ -51,6 +54,7 @@ endif()
 # Discover tests at ctest time (PRE_TEST) instead of build time so a slow
 # first launch of a freshly linked exe (AV scan, DLL load) can't fail the build
 gtest_discover_tests(websocket_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+gtest_discover_tests(websocket_service_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 gtest_discover_tests(http_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 gtest_discover_tests(tls_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
 gtest_discover_tests(logging_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
@@ -59,6 +63,10 @@ gtest_discover_tests(slick_buffer_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_
 
 # Set test properties
 set_target_properties(websocket_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+)
+
+set_target_properties(websocket_service_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
 )
 

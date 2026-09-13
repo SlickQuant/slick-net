@@ -1,10 +1,13 @@
 #include <slick/net/detail/websocket_impl.hpp>
 
+#include <boost/asio/executor_work_guard.hpp>
+
 namespace {
     asio::io_context ioc_;
     std::thread service_thread_;
     std::atomic_bool init_service_thread_{false};
     std::atomic_bool run_{false};
+    std::atomic_bool busy_poll_{false};
 }
 
 namespace slick::net::detail {
@@ -17,6 +20,21 @@ bool websocket_running() noexcept {
     return run_.load(std::memory_order_relaxed);
 }
 
+void set_websocket_busy_poll(bool enable) noexcept {
+    if (!enable) {
+        // The polling loop switches back to a blocking run() on its next iteration
+        busy_poll_.store(false, std::memory_order_release);
+    }
+    else if (!busy_poll_.exchange(true, std::memory_order_acq_rel)) {
+        // Wake the service thread out of a blocking run() so it starts polling
+        ioc_.stop();
+    }
+}
+
+bool websocket_busy_poll() noexcept {
+    return busy_poll_.load(std::memory_order_relaxed);
+}
+
 void start_websocket_service() {
     auto init_service = init_service_thread_.load(std::memory_order_relaxed);
     if (init_service_thread_.compare_exchange_strong(init_service, true,
@@ -24,16 +42,31 @@ void start_websocket_service() {
         run_.store(true, std::memory_order_release);
         service_thread_ = std::thread([]() {
             LOG_INFO("Websocket service thread started.");
-            while (run_.load(std::memory_order_relaxed)) {
-                try {
-                    if (ioc_.stopped()) {
-                        ioc_.restart();
+            // Clear a stop() left by a previous shutdown() or busy-poll switch
+            ioc_.restart();
+            {
+                // Outstanding work keeps run() blocked while idle; without it run()
+                // returns at once when no I/O is pending and the loop spins a core
+                auto work = asio::make_work_guard(ioc_);
+                while (run_.load(std::memory_order_acquire)) {
+                    try {
+                        if (busy_poll_.load(std::memory_order_relaxed)) {
+                            if (ioc_.poll() == 0 && ioc_.stopped()) {
+                                ioc_.restart();
+                            }
+                        }
+                        else {
+                            // With the work guard, run() only returns once stopped by
+                            // shutdown() or a busy-poll switch. run_ is re-checked after
+                            // the restart, so a shutdown() stop is never lost.
+                            ioc_.run();
+                            ioc_.restart();
+                        }
                     }
-                    ioc_.run();
-                }
-                catch(const std::exception& e) {
-                    ioc_.restart();
-                    LOG_ERROR("{}", e.what());
+                    catch(const std::exception& e) {
+                        // A throwing handler does not stop the io_context; resume as is
+                        LOG_ERROR("{}", e.what());
+                    }
                 }
             }
 

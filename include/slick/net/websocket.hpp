@@ -115,6 +115,14 @@ public:
     void send_binary_data(const char* buffer, std::size_t len, bool suppress_log = false);
     static void shutdown();
 
+    // Idle strategy of the service thread shared by every Websocket<BufferT>.
+    // Off (default): the thread blocks in the OS while no I/O is ready — no CPU is
+    // burned by an idle service. On: the thread busy-polls the io_context, pinning a
+    // CPU core to avoid kernel wake-up latency. Lock-free; takes effect immediately,
+    // including while the service is running.
+    static void set_busy_poll(bool enable) noexcept;
+    static bool busy_poll() noexcept;
+
     enum class Status : std::uint8_t {
         CONNECTING,
         CONNECTED,
