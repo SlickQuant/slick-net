@@ -130,8 +130,10 @@ else()
     target_compile_definitions(slick-net PUBLIC SLICK_NET_ENABLE_SOURCE_LOCATION=0)
 endif()
 
+# Never replace CMAKE_CXX_FLAGS_<CONFIG>: that drops NDEBUG, and slick::default_queue_traits
+# follows NDEBUG, so the library would instantiate a different producer_buffer specialization
+# than a Release consumer links against. Add optimization options to the target instead.
 if (MSVC)
-    set(CMAKE_CXX_FLAGS_RELEASE "-O2")
     add_definitions(-D_WIN32_WINNT=0x0A00)
     set(CMAKE_SUPPRESS_REGENERATION true)   # supress zero_check
     set_target_properties(slick-net PROPERTIES LINK_INCREMENTAL ON)
@@ -139,12 +141,8 @@ if (MSVC)
     if (LINK_STATICALLY)
         set_target_properties(slick-net PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
-else()
-    if(CMAKE_CROSSCOMPILING)
-        set(CMAKE_CXX_FLAGS_RELEASE "-O3")
-    else()
-        set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
-    endif()
+elseif(NOT CMAKE_CROSSCOMPILING)
+    target_compile_options(slick-net PRIVATE $<$<CONFIG:Release>:-march=native>)
 endif()
 
 if(ENABLE_ASAN)

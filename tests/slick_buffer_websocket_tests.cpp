@@ -1,4 +1,5 @@
 // Tests for Websocket<slick::dynamic_buffer<T>> backends.
+#include <slick/queue.hpp>
 #include <slick/stream_buffer.hpp>
 #include <slick/stream_buffer_multiplexer.hpp>
 #include <slick/dynamic_buffer.hpp>
@@ -8,8 +9,20 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#include <type_traits>
 
 using namespace slick::net;
+
+// ── 0. build configuration ────────────────────────────────────────────────────
+// Regression: CMakeLists.txt used to overwrite CMAKE_CXX_FLAGS_RELEASE, dropping NDEBUG from
+// Release builds. slick::default_queue_traits follows NDEBUG, so the library explicitly
+// instantiated Websocket for the debug_queue_traits producer_buffer while a normal Release
+// consumer references the queue_traits one - an unresolved symbol against an installed library.
+static_assert(std::is_same_v<slick::default_queue_traits,
+                             std::conditional_t<SLICK_NET_TEST_EXPECT_NDEBUG,
+                                                slick::queue_traits,
+                                                slick::debug_queue_traits>>,
+              "Optimized build configuration lost NDEBUG; do not replace CMAKE_CXX_FLAGS_<CONFIG>");
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

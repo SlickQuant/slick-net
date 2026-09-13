@@ -37,6 +37,9 @@ target_link_libraries(logging_tests PRIVATE slick::net GTest::gtest_main)
 add_executable(slick_buffer_tests slick_buffer_websocket_tests.cpp)
 target_link_libraries(slick_buffer_tests PRIVATE slick::net GTest::gtest_main)
 target_include_directories(slick_buffer_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+# CMake's stock optimized configs all define NDEBUG; the test asserts the build flags kept it
+target_compile_definitions(slick_buffer_tests PRIVATE
+    SLICK_NET_TEST_EXPECT_NDEBUG=$<CONFIG:Release,RelWithDebInfo,MinSizeRel>)
 if (MSVC)
     target_compile_options(slick_buffer_tests PRIVATE "/bigobj")
 endif()

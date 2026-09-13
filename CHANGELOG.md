@@ -13,6 +13,10 @@
 - Removed the internal `detail::websocket_ssl_context()` accessor in favor of `tls_context()`.
 - `slick-net` links `crypt32` on Windows.
 
+## Fixed
+- Release builds no longer lose `NDEBUG`. `CMakeLists.txt` replaced `CMAKE_CXX_FLAGS_RELEASE` (`-O2` on MSVC, `-O3 [-march=native]` elsewhere), discarding CMake's `/DNDEBUG /Ob2` / `-DNDEBUG`. Because `slick::default_queue_traits` follows `NDEBUG`, a Release `slick-net` explicitly instantiated `Websocket` for the `debug_queue_traits` `stream_buffer_multiplexer::producer_buffer`, while a normal Release consumer references the `queue_traits` specialization, causing unresolved symbols against an installed library. The stock Release flags are now kept, and `-march=native` (non-cross-compiling GCC/Clang) is applied to the `slick-net` target only, as a `PRIVATE` Release-only option.
+- `slick_buffer_tests` statically asserts that optimized configurations resolve `default_queue_traits` to `queue_traits`.
+
 # [v3.1.0] - 2026-07-07
 
 ## Added
