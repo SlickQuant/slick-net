@@ -13,7 +13,6 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/connect.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/asio/signal_set.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/ssl/stream.hpp>
 #include <boost/asio/strand.hpp>
@@ -24,7 +23,6 @@
 #include <slick/queue.hpp>
 
 #include <atomic>
-#include <csignal>
 #include <cstring>
 #include <limits>
 #include <memory>

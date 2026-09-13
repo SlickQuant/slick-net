@@ -5,10 +5,6 @@ namespace {
     std::thread service_thread_;
     std::atomic_bool init_service_thread_{false};
     std::atomic_bool run_{false};
-
-    using signal_handler_t = void (*)(int);
-    signal_handler_t previous_sigint = SIG_DFL;
-    signal_handler_t previous_sigterm = SIG_DFL;
 }
 
 namespace slick::net::detail {
@@ -21,30 +17,10 @@ bool websocket_running() noexcept {
     return run_.load(std::memory_order_relaxed);
 }
 
-extern "C" inline void __signal_handler(int signal) {
-    if (signal == SIGINT || signal == SIGTERM) {
-        Websocket<>::shutdown();
-    }
-
-    auto previous = signal == SIGINT ? previous_sigint : previous_sigterm;
-    if (previous && previous != SIG_DFL && previous != SIG_IGN) {
-        previous(signal);
-    } else if (previous == SIG_DFL) {
-        std::signal(signal, SIG_DFL);
-        std::raise(signal);
-    }
-}
-
-void install_signal_handlers() {
-    previous_sigint = std::signal(SIGINT, __signal_handler);
-    previous_sigterm = std::signal(SIGTERM, __signal_handler);
-}
-
 void start_websocket_service() {
     auto init_service = init_service_thread_.load(std::memory_order_relaxed);
     if (init_service_thread_.compare_exchange_strong(init_service, true,
                                                      std::memory_order_acq_rel) && !init_service) {
-        install_signal_handlers();
         run_.store(true, std::memory_order_release);
         service_thread_ = std::thread([]() {
             LOG_INFO("Websocket service thread started.");
@@ -80,8 +56,6 @@ void stop_websocket_service() {
             service_thread_.join();
         }
     }
-    previous_sigint = SIG_DFL;
-    previous_sigterm = SIG_DFL;
 }
 
 struct WebsocketServiceTerminater {

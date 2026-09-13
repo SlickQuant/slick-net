@@ -155,6 +155,46 @@ Setting `tls_context().set_verify_mode(boost::asio::ssl::verify_none)` disables 
 certificate and host name verification and exposes connections to man-in-the-middle
 interception — use it only for local testing.
 
+### Signal Handling
+
+`slick-net` does not install `SIGINT`/`SIGTERM` handlers — signal dispositions belong to
+the application. Without a handler the default action terminates the process; the
+`Websocket` and `HttpStream` services are shut down automatically at normal program exit.
+
+For a graceful Ctrl-C, record the signal in your handler and call `shutdown()` from normal
+code. `shutdown()` stops the `io_context` and joins the service thread, so it must never be
+called from a signal handler:
+
+```cpp
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <thread>
+#include <slick/net/websocket.hpp>
+
+namespace {
+std::atomic_bool stop_requested{false}; // lock-free: safe to store from a signal handler
+
+void on_signal(int) {
+    stop_requested.store(true, std::memory_order_relaxed);
+}
+}
+
+int main() {
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGTERM, on_signal);
+
+    // ... create and open connections ...
+
+    while (!stop_requested.load(std::memory_order_relaxed) &&
+           slick::net::Websocket<>::is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    slick::net::Websocket<>::shutdown();
+}
+```
+
 ## Usage
 
 ### Basic WebSocket Client

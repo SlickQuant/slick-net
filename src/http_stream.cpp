@@ -15,7 +15,6 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/as_tuple.hpp>
 
-#include <csignal>
 #include <thread>
 
 namespace beast = boost::beast;
@@ -45,12 +44,6 @@ namespace {
 
     static HttpStreamTerminater s_http_stream_terminater;
 }   // end namespace
-
-extern "C" void __http_stream_signal_handler(int signal) {
-    if (signal == SIGINT || signal == SIGTERM) {
-        HttpStream::shutdown();
-    }
-}
 
 HttpStream::HttpStream(
     std::string url,
@@ -92,8 +85,6 @@ void HttpStream::open()
     bool expected = false;
     if (init_service_thread_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
-        std::signal(SIGINT, __http_stream_signal_handler);
-        std::signal(SIGTERM, __http_stream_signal_handler);
         run_.store(true, std::memory_order_release);
         service_thread_ = std::thread([self = shared_from_this()]() {
             while (run_.load(std::memory_order_acquire)) {

@@ -6,14 +6,17 @@
 ## Added
 - `slick::net::tls_context()` (`<slick/net/tls.hpp>`): the TLS client context shared by `Http`, `HttpStream` and `Websocket`, created lock-free on first use with `verify_peer` and the system trust roots (`SSL_CERT_FILE`/`SSL_CERT_DIR` when set, otherwise the Windows `ROOT` store or the OS CA bundle plus OpenSSL default paths). Use it to trust a private CA, e.g. `tls_context().load_verify_file(...)`.
 - `tls_tests` — hermetic tests against a local TLS server with runtime-generated certificates covering trusted, untrusted, host name mismatch and IP address mismatch handshakes for all three clients.
+- `signal_tests` — verifies `HttpStream` and `Websocket` leave application `SIGINT`/`SIGTERM` handlers installed and keep running when those signals are raised.
 
 ## Changed
 - TLS handshake failures now throw/report `TLS handshake failed (<verification reason>)`.
 - SNI is no longer sent for IP-literal hosts (RFC 6066); IP hosts are verified against the certificate's iPAddress SANs.
 - Removed the internal `detail::websocket_ssl_context()` accessor in favor of `tls_context()`.
 - `slick-net` links `crypt32` on Windows.
+- `<slick/net/detail/websocket_impl.hpp>` no longer includes `<boost/asio/signal_set.hpp>` or `<csignal>`.
 
 ## Fixed
+- `HttpStream` and `Websocket` no longer install process-wide `SIGINT`/`SIGTERM` handlers. The handlers called `shutdown()` — logging, stopping the `io_context` and joining the service thread — from signal context, none of which is async-signal-safe; they were never restored, and `HttpStream` overwrote the application's handlers and swallowed Ctrl-C. Signal dispositions are now left to the application, which should call `shutdown()` from normal code after its own handler records the signal (see README). Services are still shut down at normal program exit.
 - Release builds no longer lose `NDEBUG`. `CMakeLists.txt` replaced `CMAKE_CXX_FLAGS_RELEASE` (`-O2` on MSVC, `-O3 [-march=native]` elsewhere), discarding CMake's `/DNDEBUG /Ob2` / `-DNDEBUG`. Because `slick::default_queue_traits` follows `NDEBUG`, a Release `slick-net` explicitly instantiated `Websocket` for the `debug_queue_traits` `stream_buffer_multiplexer::producer_buffer`, while a normal Release consumer references the `queue_traits` specialization, causing unresolved symbols against an installed library. The stock Release flags are now kept, and `-march=native` (non-cross-compiling GCC/Clang) is applied to the `slick-net` target only, as a `PRIVATE` Release-only option.
 - `slick_buffer_tests` statically asserts that optimized configurations resolve `default_queue_traits` to `queue_traits`.
 
