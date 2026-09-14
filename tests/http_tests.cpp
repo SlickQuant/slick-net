@@ -15,6 +15,16 @@
 #include <slick/net/http.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/as_tuple.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/read.hpp>
+#include <boost/asio/read_until.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/write.hpp>
+#include <format>
+#include <vector>
 
 namespace slick::net {
 
@@ -41,6 +51,157 @@ protected:
         return pred();
     }
 };
+
+// ======================== Concurrent Synchronous Request Tests ========================
+
+// Loopback plain HTTP server that answers every request with "<METHOD> <target>[ <body>]",
+// letting a caller verify it received the response to its own request. Targets starting with
+// "/slow" are answered after slow_response_delay.
+class local_echo_server {
+public:
+    static constexpr std::chrono::milliseconds slow_response_delay{2000};
+
+    local_echo_server()
+        : acceptor_(ioc_, {boost::asio::ip::address_v4::loopback(), 0})
+        , port_(acceptor_.local_endpoint().port()) {
+        boost::asio::co_spawn(ioc_, accept_loop(), boost::asio::detached);
+        thread_ = std::thread([this] { ioc_.run(); });
+    }
+
+    ~local_echo_server() {
+        ioc_.stop();
+        thread_.join();
+    }
+
+    uint16_t port() const noexcept { return port_; }
+    int slow_requests() const noexcept { return slow_requests_.load(std::memory_order_acquire); }
+
+private:
+    boost::asio::awaitable<void> accept_loop() {
+        for (;;) {
+            auto [ec, socket] = co_await acceptor_.async_accept(boost::asio::as_tuple(boost::asio::use_awaitable));
+            if (ec) {
+                co_return;
+            }
+            boost::asio::co_spawn(ioc_, serve(std::move(socket)), boost::asio::detached);
+        }
+    }
+
+    boost::asio::awaitable<void> serve(boost::asio::ip::tcp::socket socket) {
+        const auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
+        std::string request;
+        if (auto [ec, n] = co_await boost::asio::async_read_until(socket, boost::asio::dynamic_buffer(request), "\r\n\r\n", token); ec) {
+            co_return;
+        }
+
+        const auto header_end = request.find("\r\n\r\n") + 4;
+        std::size_t content_length = 0;
+        if (auto pos = request.find("Content-Length: "); pos < header_end) {
+            content_length = std::stoul(request.substr(pos + 16));
+        }
+        // Drain the body so closing the socket does not reset the connection
+        if (request.size() < header_end + content_length) {
+            auto remaining = header_end + content_length - request.size();
+            if (auto [ec, n] = co_await boost::asio::async_read(socket, boost::asio::dynamic_buffer(request),
+                                                                 boost::asio::transfer_exactly(remaining), token); ec) {
+                co_return;
+            }
+        }
+
+        auto echo = request.substr(0, request.find(" HTTP/"));
+        if (echo.find(" /slow") != std::string::npos) {
+            slow_requests_.fetch_add(1, std::memory_order_release);
+            boost::asio::steady_timer timer{socket.get_executor(), slow_response_delay};
+            co_await timer.async_wait(token);
+        }
+        if (content_length) {
+            echo += ' ';
+            echo.append(request, header_end, content_length);
+        }
+        auto response = std::format("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", echo.size(), echo);
+        co_await boost::asio::async_write(socket, boost::asio::buffer(response), token);
+        boost::system::error_code ec;
+        socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+    }
+
+    boost::asio::io_context ioc_;
+    boost::asio::ip::tcp::acceptor acceptor_;
+    uint16_t port_;
+    std::atomic<int> slow_requests_{0};
+    std::thread thread_;
+};
+
+// Regression: a synchronous call ran the shared io_context until it had no work left at all, so it
+// did not return until every other thread's in-flight synchronous request had finished too.
+TEST_F(HttpTest, SyncRequest_NotBlockedByOtherThreadsSlowRequest) {
+    local_echo_server server;
+    const auto base_url = std::format("http://127.0.0.1:{}", server.port());
+
+    Http::Response slow_response;
+    std::thread slow_thread([&] { slow_response = Http::get(base_url + "/slow"); });
+    const bool slow_in_flight = wait_for_condition([&] { return server.slow_requests() > 0; }, std::chrono::seconds(5));
+
+    const auto begin = std::chrono::steady_clock::now();
+    const auto fast_response = Http::get(base_url + "/fast");
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+    slow_thread.join();
+
+    ASSERT_TRUE(slow_in_flight) << "slow request never reached the server";
+    EXPECT_EQ(fast_response.result_code, 200);
+    EXPECT_EQ(fast_response.result_text, "GET /fast");
+    EXPECT_LT(elapsed_ms, local_echo_server::slow_response_delay.count() / 2)
+        << "fast request waited for the other thread's slow request";
+    EXPECT_EQ(slow_response.result_code, 200);
+    EXPECT_EQ(slow_response.result_text, "GET /slow");
+}
+
+// Regression: all synchronous calls shared one io_context and raced on restart()/run(), so a
+// caller could return an empty response (its run() saw the context stopped by another thread)
+// or have its response written through a dangling reference after returning.
+TEST_F(HttpTest, SyncRequests_ConcurrentThreads_EachGetsOwnResponse) {
+    local_echo_server server;
+    constexpr int thread_count = 8;
+    constexpr int requests_per_thread = 50;
+
+    std::atomic<bool> start{false};
+    std::vector<std::vector<std::string>> failures(thread_count);
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    for (int t = 0; t < thread_count; ++t) {
+        threads.emplace_back([&, t] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int i = 0; i < requests_per_thread; ++i) {
+                auto target = std::format("/t{}/r{}", t, i);
+                auto url = std::format("http://127.0.0.1:{}{}", server.port(), target);
+                auto data = std::format("data-{}-{}", t, i);
+                Http::Response response;
+                std::string expected;
+                switch ((t + i) % 5) {
+                case 0: response = Http::get(url); expected = "GET " + target; break;
+                case 1: response = Http::post(url, data); expected = std::format("POST {} {}", target, data); break;
+                case 2: response = Http::put(url, data); expected = std::format("PUT {} {}", target, data); break;
+                case 3: response = Http::patch(url, data); expected = std::format("PATCH {} {}", target, data); break;
+                default: response = Http::del(url, ""); expected = "DELETE " + target; break;
+                }
+                if (response.result_code != 200 || response.result_text != expected) {
+                    failures[t].push_back(std::format("expected 200 '{}', got {} '{}'",
+                                                      expected, response.result_code, response.result_text));
+                }
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    for (int t = 0; t < thread_count; ++t) {
+        EXPECT_TRUE(failures[t].empty()) << "thread " << t << ": " << failures[t].size()
+                                         << " bad responses, first: " << failures[t].front();
+    }
+}
 
 // ======================== Synchronous GET Tests ========================
 

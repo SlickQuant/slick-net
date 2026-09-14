@@ -28,7 +28,6 @@ namespace slick::net {
 namespace {
         
     using Response = Http::Response;
-    asio::io_context ioc_;
     asio::io_context async_ioc_;
 
     struct service_info
@@ -326,116 +325,75 @@ namespace {
         }
     }
 
+    Response run_sync_request(
+        asio::io_context& ioc,
+        std::string_view url,
+        http::verb method,
+        std::vector<std::pair<std::string, std::string>>&& headers,
+        std::string_view body)
+    {
+        Response res;
+        ioc.restart();
+        asio::co_spawn(
+            ioc,
+            do_session_awaitable(std::string(url), method, std::move(headers), std::string(body)),
+            [&res](std::exception_ptr e, Response&& response) {
+                if (!e) {
+                    res = std::move(response);
+                    return;
+                }
+                try {
+                    std::rethrow_exception(e);
+                } catch (const std::exception& ex) {
+                    res.result_code = 500;
+                    res.result_text = ex.what();
+                } catch (...) {
+                    res.result_code = 500;
+                    res.result_text = "Unknown error";
+                }
+            });
+        ioc.run();
+        return res;
+    }
+
+    Response sync_request(
+        std::string_view url,
+        http::verb method,
+        std::vector<std::pair<std::string, std::string>>&& headers,
+        std::string_view body = {})
+    {
+        // One io_context per calling thread: concurrent synchronous calls never share one, so they
+        // need no synchronization, and run() returns as soon as this thread's own request is done.
+        // Reusing it keeps the reactor, timer and resolver services alive across calls.
+        thread_local asio::io_context ioc;
+        if (ioc.get_executor().running_in_this_thread()) [[unlikely]] {
+            // Nested call from code executing inside this thread's request (e.g. a log handler)
+            asio::io_context nested_ioc;
+            return run_sync_request(nested_ioc, url, method, std::move(headers), body);
+        }
+        return run_sync_request(ioc, url, method, std::move(headers), body);
+    }
+
 } // namespace
 
 Http::Response Http::get(std::string_view url, std::vector<std::pair<std::string, std::string>>&& headers) {
-    Http::Response res;
-    ioc_.restart();
-    asio::co_spawn(
-        ioc_,
-        do_session(std::string(url), http::verb::get, [&res](Response&& response) {
-            res = std::move(response);
-        }, std::move(headers)),
-        [&res](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    res.result_code = 500;
-                    res.result_text = e.what();
-                }
-            }
-        });
-    ioc_.run();
-    return res;
+    return sync_request(url, http::verb::get, std::move(headers));
 }
 
 Http::Response Http::post(std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers) {
-    Response res;
-    ioc_.restart();
-    asio::co_spawn(
-        ioc_,
-        do_session(std::string(url), http::verb::post, [&res](Response&& response) {
-            res = std::move(response);
-        }, std::move(headers), std::string(data)),
-        [&res](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    res.result_code = 500;
-                    res.result_text = e.what();
-                }
-            }
-        });
-    ioc_.run();
-    return res;
+    return sync_request(url, http::verb::post, std::move(headers), data);
 }
 
 Http::Response Http::put(std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers) {
-    Response res;
-    ioc_.restart();
-    asio::co_spawn(
-        ioc_,
-        do_session(std::string(url), http::verb::put, [&res](Response&& response) {
-            res = std::move(response);
-        }, std::move(headers), std::string(data)),
-        [&res](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    res.result_code = 500;
-                    res.result_text = e.what();
-                }
-            }
-        });
-    ioc_.run();
-    return res;
+    return sync_request(url, http::verb::put, std::move(headers), data);
 }
 
 Http::Response Http::patch(std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers) {
-    Response res;
-    ioc_.restart();
-    asio::co_spawn(
-        ioc_,
-        do_session(std::string(url), http::verb::patch, [&res](Response&& response) {
-            res = std::move(response);
-        }, std::move(headers), std::string(data)),
-        [&res](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    res.result_code = 500;
-                    res.result_text = e.what();
-                }
-            }
-        });
-    ioc_.run();
-    return res;
+    return sync_request(url, http::verb::patch, std::move(headers), data);
 }
 
 Http::Response Http::del(std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers) {
-    Response res;
-    ioc_.restart();
-    asio::co_spawn(
-        ioc_,
-        do_session(std::string(url), http::verb::delete_, [&res](Response&& response) {
-            res = std::move(response);
-        }, std::move(headers), std::string(data)),
-        [&res](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    res.result_code = 500;
-                    res.result_text = e.what();
-                }
-            }
-        });
-    ioc_.run();
-    return res;
+    return sync_request(url, http::verb::delete_, std::move(headers), data);
 }
 
 void Http::async_get(std::function<void(Response&&)> on_response, std::string_view url, std::vector<std::pair<std::string, std::string>>&& headers) {
