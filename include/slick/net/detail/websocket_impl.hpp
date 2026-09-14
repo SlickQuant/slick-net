@@ -3,6 +3,7 @@
 #include <slick/net/websocket.hpp>
 #include <slick/net/logging.hpp>
 #include <slick/net/tls.hpp>
+#include <slick/net/detail/url.hpp>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -54,48 +55,8 @@ struct websocket_url_parts {
 };
 
 inline websocket_url_parts parse_websocket_url(const std::string& url) {
-    std::string protocol("wss");
-    std::string host;
-    std::string path;
-
-    auto pos = url.find("://");
-    if (pos == std::string::npos) {
-        pos = url.find('/');
-        if (pos == std::string::npos) {
-            host = url;
-            path = "/";
-        }
-        else {
-            host = url.substr(0, pos);
-            path = url.substr(pos);
-        }
-    }
-    else {
-        protocol = url.substr(0, pos);
-        auto host_begin = pos + 3;
-        auto path_begin = url.find('/', host_begin);
-        if (path_begin == std::string::npos) {
-            host = url.substr(host_begin);
-            path = "/";
-        }
-        else {
-            host = url.substr(host_begin, path_begin - host_begin);
-            path = url.substr(path_begin);
-        }
-    }
-
-    auto port = static_cast<uint_fast16_t>((std::numeric_limits<uint_fast16_t>::max)());
-    pos = host.rfind(':');
-    if (pos != std::string::npos && host.find(':') == pos) {
-        port = static_cast<uint_fast16_t>(std::stoi(host.substr(pos + 1)));
-        host = host.substr(0, pos);
-    }
-
-    if (port == static_cast<uint_fast16_t>((std::numeric_limits<uint_fast16_t>::max)())) {
-        port = (protocol == "ws") ? 80 : 443;
-    }
-
-    return {std::move(host), std::move(path), port, protocol == "wss"};
+    auto parts = parse_url_parts(url, "ws", "wss");
+    return {std::move(parts.host), std::move(parts.target), parts.port, parts.use_ssl};
 }
 
 } // namespace slick::net::detail
@@ -361,7 +322,7 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_ssl() {
         auto ep = co_await asio::async_connect(wss_->next_layer().lowest_layer(), result,
                                                asio::use_awaitable);
         // Keep host_ unchanged for reconnects; build the host header with the actual port.
-        const auto host_header = host_ + ':' + std::to_string(ep.port());
+        const auto host_header = detail::format_authority(host_, ep.port());
 
         beast::get_lowest_layer(*wss_).expires_after(std::chrono::seconds(30));
         if (auto [ec] = co_await wss_->next_layer().async_handshake(
@@ -431,7 +392,7 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_plain() {
 
         beast::get_lowest_layer(*ws_).expires_after(std::chrono::seconds(30));
         auto ep = co_await beast::get_lowest_layer(*ws_).async_connect(result);
-        const auto host_header = host_ + ':' + std::to_string(ep.port());
+        const auto host_header = detail::format_authority(host_, ep.port());
 
         beast::get_lowest_layer(*ws_).expires_never();
         ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));

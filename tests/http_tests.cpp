@@ -24,7 +24,11 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
 #include <format>
+#include <stdexcept>
+#include <tuple>
 #include <vector>
+
+#include "../src/utils.hpp"
 
 namespace slick::net {
 
@@ -54,15 +58,15 @@ protected:
 
 // ======================== Concurrent Synchronous Request Tests ========================
 
-// Loopback plain HTTP server that answers every request with "<METHOD> <target>[ <body>]",
+// Loopback plain HTTP server that answers every request with "<METHOD> <target>[ host=<Host>][ <body>]",
 // letting a caller verify it received the response to its own request. Targets starting with
-// "/slow" are answered after slow_response_delay.
+// "/slow" are answered after slow_response_delay; targets starting with "/host" echo the Host header.
 class local_echo_server {
 public:
     static constexpr std::chrono::milliseconds slow_response_delay{2000};
 
-    local_echo_server()
-        : acceptor_(ioc_, {boost::asio::ip::address_v4::loopback(), 0})
+    explicit local_echo_server(const boost::asio::ip::address& address = boost::asio::ip::address_v4::loopback())
+        : acceptor_(ioc_, {address, 0})
         , port_(acceptor_.local_endpoint().port()) {
         boost::asio::co_spawn(ioc_, accept_loop(), boost::asio::detached);
         thread_ = std::thread([this] { ioc_.run(); });
@@ -113,6 +117,13 @@ private:
             slow_requests_.fetch_add(1, std::memory_order_release);
             boost::asio::steady_timer timer{socket.get_executor(), slow_response_delay};
             co_await timer.async_wait(token);
+        }
+        if (echo.find(" /host") != std::string::npos) {
+            if (auto pos = request.find("\r\nHost: "); pos < header_end) {
+                pos += 8;
+                echo += " host=";
+                echo.append(request, pos, request.find("\r\n", pos) - pos);
+            }
         }
         if (content_length) {
             echo += ' ';
@@ -201,6 +212,81 @@ TEST_F(HttpTest, SyncRequests_ConcurrentThreads_EachGetsOwnResponse) {
         EXPECT_TRUE(failures[t].empty()) << "thread " << t << ": " << failures[t].size()
                                          << " bad responses, first: " << failures[t].front();
     }
+}
+
+// ======================== URL Parsing Tests ========================
+
+using url_tuple = std::tuple<std::string, std::string, std::string, bool>;
+
+// Regression: the parser ignored a colon at offset 3 or 4 of the already scheme-stripped authority,
+// so "abc:8080" resolved the literal host "abc:8080" on the default port.
+TEST_F(HttpTest, ParseUrl_ShortHostWithExplicitPort) {
+    EXPECT_EQ(parse_url("http://abc:8080/feed"), (url_tuple{"abc", "/feed", "8080", false}));
+    EXPECT_EQ(parse_url("https://test:9443"), (url_tuple{"test", "/", "9443", true}));
+    EXPECT_EQ(parse_url("abcd:81/x"), (url_tuple{"abcd", "/x", "81", true}));
+    EXPECT_EQ(parse_url("http://localhost:8080/p"), (url_tuple{"localhost", "/p", "8080", false}));
+}
+
+// Regression: "[::1]:8080" split at the first colon, so std::stoi threw on ":1]:8080".
+TEST_F(HttpTest, ParseUrl_Ipv6Literals) {
+    EXPECT_EQ(parse_url("http://[::1]:8080/p?q=1"), (url_tuple{"::1", "/p?q=1", "8080", false}));
+    EXPECT_EQ(parse_url("https://[2001:db8::1]"), (url_tuple{"2001:db8::1", "/", "443", true}));
+    EXPECT_EQ(parse_url("[fe80::1]:9000/x"), (url_tuple{"fe80::1", "/x", "9000", true}));
+    EXPECT_EQ(parse_url("http://::1/"), (url_tuple{"::1", "/", "80", false}));
+}
+
+TEST_F(HttpTest, ParseUrl_AuthorityDelimiters) {
+    EXPECT_EQ(parse_url("http://host:8080?x=1"), (url_tuple{"host", "/?x=1", "8080", false}));
+    EXPECT_EQ(parse_url("https://host:8443#frag"), (url_tuple{"host", "/", "8443", true}));
+    EXPECT_EQ(parse_url("https://host/p#frag"), (url_tuple{"host", "/p", "443", true}));
+    EXPECT_EQ(parse_url("http://host:/p"), (url_tuple{"host", "/p", "80", false}));
+    EXPECT_EQ(parse_url("http://a/b:9000"), (url_tuple{"a", "/b:9000", "80", false}));
+}
+
+TEST_F(HttpTest, ParseUrl_RejectsMalformedAuthority) {
+    for (const auto* url : {"http://h:abc/", "http://h:70000", "http://h:0", "http://h:-1", "http://h:8080x",
+                            "http://[::1", "http://[::1]8080/"}) {
+        EXPECT_THROW(parse_url(url), std::invalid_argument) << url;
+    }
+}
+
+TEST_F(HttpTest, FormatAuthority_BracketsIpv6) {
+    EXPECT_EQ(detail::format_authority("example.com"), "example.com");
+    EXPECT_EQ(detail::format_authority("::1"), "[::1]");
+    EXPECT_EQ(detail::format_authority("::1", 9000), "[::1]:9000");
+    EXPECT_EQ(detail::format_authority("abc", 65535), "abc:65535");
+}
+
+TEST_F(HttpTest, SyncGet_Ipv6LiteralWithPort) {
+    std::unique_ptr<local_echo_server> server;
+    try {
+        server = std::make_unique<local_echo_server>(boost::asio::ip::address_v6::loopback());
+    } catch (const boost::system::system_error& e) {
+        GTEST_SKIP() << "IPv6 loopback unavailable: " << e.what();
+    }
+
+    auto response = Http::get(std::format("http://[::1]:{}/host?v=6", server->port()));
+    EXPECT_EQ(response.result_code, 200) << response.result_text;
+    EXPECT_EQ(response.result_text, "GET /host?v=6 host=[::1]");
+}
+
+// Regression: parse errors threw out of Http::get/async_get instead of producing an error response,
+// and async_get had already counted the request, keeping the async service thread alive forever.
+TEST_F(HttpTest, MalformedUrl_ReportedAsErrorResponse) {
+    auto response = Http::get("http://127.0.0.1:99999/");
+    EXPECT_EQ(response.result_code, 500);
+    EXPECT_NE(response.result_text.find("Invalid port"), std::string::npos) << response.result_text;
+
+    std::atomic<bool> done{false};
+    Http::Response async_response;
+    EXPECT_NO_THROW(Http::async_get([&](Http::Response&& r) {
+        async_response = std::move(r);
+        done.store(true, std::memory_order_release);
+    }, "http://[::1/"));
+    ASSERT_TRUE(wait_for_condition([&] { return done.load(std::memory_order_acquire); }, std::chrono::seconds(5)));
+    EXPECT_EQ(async_response.result_code, 500);
+    // The async completion handler reports exceptions as Response{500, what()}, i.e. in `reason`
+    EXPECT_NE(async_response.reason.find("Invalid IPv6 literal"), std::string::npos) << async_response.reason;
 }
 
 // ======================== Synchronous GET Tests ========================

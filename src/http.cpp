@@ -61,7 +61,7 @@ namespace {
 
         // Set up an HTTP request message
         http::request<http::string_body> req{ method, target, version };
-        req.set(http::field::host, host);
+        req.set(http::field::host, detail::format_authority(host));
         req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
 
         // Set headers
@@ -147,7 +147,7 @@ namespace {
 
         // Set up an HTTP request message
         http::request<http::string_body> req{ method, target, version };
-        req.set(http::field::host, host);
+        req.set(http::field::host, detail::format_authority(host));
         req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
 
         // Set headers
@@ -217,13 +217,12 @@ namespace {
         std::string body = "",
         int version = 11)
     {
+        // Parse inside the coroutine so a malformed URL is reported like any other request error
         auto [host, target, port, use_ssl] = parse_url(url);
 
-        if (use_ssl) {
-            return do_session_ssl_awaitable(host, target, port, method, headers, body, version);
-        } else {
-            return do_session_plain_awaitable(host, target, port, method, headers, body, version);
-        }
+        co_return co_await (use_ssl
+            ? do_session_ssl_awaitable(std::move(host), std::move(target), std::move(port), method, std::move(headers), std::move(body), version)
+            : do_session_plain_awaitable(std::move(host), std::move(target), std::move(port), method, std::move(headers), std::move(body), version));
     }
 
     asio::awaitable<void> do_session_ssl(
@@ -264,13 +263,13 @@ namespace {
         std::string body = "",
         int version = 11)
     {
+        // Parse inside the coroutine so a malformed URL reaches the completion handler instead of
+        // throwing out of async_*() after ensure_service_thread() counted the request
         auto [host, target, port, use_ssl] = parse_url(url);
 
-        if (use_ssl) {
-            return do_session_ssl(host, target, port, method, on_response, headers, body, version);
-        } else {
-            return do_session_plain(host, target, port, method, on_response, headers, body, version);
-        }
+        co_await (use_ssl
+            ? do_session_ssl(std::move(host), std::move(target), std::move(port), method, std::move(on_response), std::move(headers), std::move(body), version)
+            : do_session_plain(std::move(host), std::move(target), std::move(port), method, std::move(on_response), std::move(headers), std::move(body), version));
     }
 
     void async_request_done() {

@@ -186,6 +186,25 @@ TEST_F(WebsocketTest, UrlParserHandlesShortHostPortForms) {
     EXPECT_TRUE(colon_at_four.use_ssl);
 }
 
+// Regression: an authority with more than one colon skipped port parsing, so "[::1]:9000" was
+// resolved as the literal host "[::1]:9000" on the default port.
+TEST_F(WebsocketTest, UrlParserHandlesIpv6Literals) {
+    auto with_port = detail::parse_websocket_url("ws://[::1]:9000/feed?x=1");
+    EXPECT_EQ(with_port.host, "::1");
+    EXPECT_EQ(with_port.path, "/feed?x=1");
+    EXPECT_EQ(with_port.port, 9000);
+    EXPECT_FALSE(with_port.use_ssl);
+
+    auto without_port = detail::parse_websocket_url("wss://[2001:db8::1]");
+    EXPECT_EQ(without_port.host, "2001:db8::1");
+    EXPECT_EQ(without_port.path, "/");
+    EXPECT_EQ(without_port.port, 443);
+    EXPECT_TRUE(without_port.use_ssl);
+
+    EXPECT_EQ(detail::format_authority(with_port.host, with_port.port), "[::1]:9000");
+    EXPECT_THROW(detail::parse_websocket_url("ws://[::1:9000/feed"), std::invalid_argument);
+}
+
 TEST_F(WebsocketTest, StatusTransitions) {
     std::atomic<bool> connected_called{false};
     std::atomic<bool> disconnected_called{false};

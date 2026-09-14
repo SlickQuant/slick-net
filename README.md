@@ -125,6 +125,15 @@ slick::net::clear_log_handler();
 **Macros:** `LOG_TRACE`, `LOG_DEBUG`, `LOG_INFO`, `LOG_WARN`, `LOG_ERROR`, `LOG_FATAL` — each
 checks `should_log()` before evaluating its arguments.
 
+### URLs
+
+`Http`, `HttpStream` and `Websocket` accept `[scheme://]host[:port][/path][?query]`. The host
+may be a name, an IPv4 address or a bracketed IPv6 literal (`http://[::1]:8080/feed`). Without a
+scheme `https`/`wss` is assumed; without a port, 80 is used for `http`/`ws` and 443 otherwise.
+A `#fragment` is not sent. A port outside 1-65535 or an unterminated `[` is rejected with
+`std::invalid_argument`: `Http` reports it as a `500` response, while the `HttpStream` and
+`Websocket` constructors throw it.
+
 ### TLS Certificate Verification
 
 `Http`, `HttpStream` and `Websocket` share one TLS client context for `https://` and
