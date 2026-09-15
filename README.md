@@ -640,24 +640,57 @@ The `HttpStream` class provides support for HTTP streaming, including Server-Sen
 
 The response body is decoded by Beast's HTTP parser, so `onData` never sees transfer-coding framing (chunk sizes, chunk extensions, trailers). For a `text/event-stream` response it receives the `data` of each complete event, however the events are split across reads (even inside a CRLF line ending), and parsing takes time linear in the body size; a partial event left when a response ends is discarded. For any other content type it receives the decoded body bytes as they arrive, in pieces of at most 8 KiB that need not align with the server's chunks. A chunked or `Content-Length` body that ends early is reported through `onError`. A stream has no idle timeout: it stays open until the server ends the response or `close()` is called, and `close()` interrupts a pending read immediately.
 
-**Constructor:**
+**Threading:** a stream constructed without an executor runs on the shared service: one `io_context` run by `HttpStream::service_threads()` threads, 1 by default. Each stream runs its I/O and callbacks through a strand of its own, so the callbacks of one stream never run concurrently. A callback that blocks, however, occupies a service thread — with the default single thread, every other stream on the service waits for it. To keep a slow callback from stalling other streams, either run the service on more threads (callbacks of different streams may then run concurrently), or give the stream an executor of its own, such as an `io_context` you run or a `boost::asio::thread_pool`. A stream on its own executor never touches the shared service: its `open()` does not start the service and `shutdown()` does not stop it, so keep the executor's context running until the stream disconnects.
+
 ```cpp
+// Run the shared service on 4 threads; applies at the first open(), or the first open() after shutdown()
+HttpStream::set_service_threads(4);
+
+// Or give a stream an executor of its own
+boost::asio::thread_pool pool{2};
+auto stream = std::make_shared<HttpStream>(
+    pool.get_executor(),
+    "https://api.example.com/events",
+    []() {},
+    []() {},
+    [](const char* data, size_t size) { /* slow processing only delays this stream */ },
+    [](std::string err) {}
+);
+stream->open();
+```
+
+**Constructors:**
+```cpp
+// Runs on the shared service
 HttpStream(
     std::string url,
     std::function<void()> onConnected,
     std::function<void()> onDisconnected,
     std::function<void(const char*, std::size_t)> onData,
-    std::function<void(std::string&&)> onError,
+    std::function<void(std::string)> onError,
+    std::vector<std::pair<std::string, std::string>>&& headers = {}
+)
+
+// Runs on executor; a null executor selects the shared service
+HttpStream(
+    boost::asio::any_io_executor executor,
+    std::string url,
+    std::function<void()> onConnected,
+    std::function<void()> onDisconnected,
+    std::function<void(const char*, std::size_t)> onData,
+    std::function<void(std::string)> onError,
     std::vector<std::pair<std::string, std::string>>&& headers = {}
 )
 ```
 
 **Methods:**
-- `void open()` - Start the HTTP stream connection
+- `void open()` - Start the HTTP stream connection; starts the shared service for a stream on it
 - `void close()` - Close the stream connection
 - `Status status() const` - Get current connection status
-- `static bool is_running()` - Check if any streams are running
-- `static void shutdown()` - Shutdown all HTTP stream services
+- `static bool is_running()` - Check if the shared stream service is running
+- `static void shutdown()` - Stop the shared stream service and join its threads; the next `open()` of a stream on it starts it again. Streams on their own executors are unaffected
+- `static void set_service_threads(std::size_t count)` - Number of threads that run the shared service (default 1, minimum 1); lock-free, applies when the service starts
+- `static std::size_t service_threads()` - Configured number of shared service threads
 
 **Status Enum:**
 - `CONNECTING` - Connection in progress

@@ -18,10 +18,12 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
 #include <format>
@@ -64,12 +66,21 @@ protected:
         std::vector<std::string> errors;
     };
 
-    // Opens an HttpStream to a loopback plain HTTP server on port that records what it delivers into capture
-    std::shared_ptr<HttpStream> open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture);
+    // Opens an HttpStream to a loopback plain HTTP server on port that records what it delivers into capture.
+    // A null executor runs the stream on the shared HttpStream service.
+    std::shared_ptr<HttpStream> open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture,
+                                                     boost::asio::any_io_executor executor = {});
 
     // Streams a scripted_response_server's response, pausing between segments, and waits for the stream to disconnect
     std::shared_ptr<stream_capture> stream_scripted_response(std::vector<std::string> segments,
-                                                             std::chrono::milliseconds pause = std::chrono::milliseconds(20));
+                                                             std::chrono::milliseconds pause = std::chrono::milliseconds(20),
+                                                             boost::asio::any_io_executor executor = {});
+
+    using open_stream_fn = std::function<std::shared_ptr<HttpStream>(uint16_t port, std::shared_ptr<stream_capture> capture)>;
+
+    // Blocks the onData callback of a stream on the shared service, opens a second stream through open_other and
+    // checks the second stream delivers its whole response while that callback is still blocked
+    void expect_blocked_callback_does_not_stall(const open_stream_fn& open_other);
 };
 
 // ======================== Concurrent Synchronous Request Tests ========================
@@ -1163,9 +1174,11 @@ private:
     std::thread thread_;
 };
 
-std::shared_ptr<HttpStream> HttpTest::open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture) {
+std::shared_ptr<HttpStream> HttpTest::open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture,
+                                                           boost::asio::any_io_executor executor) {
     // Callbacks share ownership so a stream that outlives its test never touches a dead capture
     auto stream = std::make_shared<HttpStream>(
+        std::move(executor),
         std::format("http://127.0.0.1:{}/stream", port),
         [capture] { capture->connected.store(true, std::memory_order_release); },
         [capture] { capture->disconnected.store(true, std::memory_order_release); },
@@ -1177,10 +1190,11 @@ std::shared_ptr<HttpStream> HttpTest::open_captured_stream(uint16_t port, std::s
 }
 
 std::shared_ptr<HttpTest::stream_capture> HttpTest::stream_scripted_response(std::vector<std::string> segments,
-                                                                             std::chrono::milliseconds pause) {
+                                                                             std::chrono::milliseconds pause,
+                                                                             boost::asio::any_io_executor executor) {
     scripted_response_server server{std::move(segments), pause};
     auto capture = std::make_shared<stream_capture>();
-    auto stream = open_captured_stream(server.port(), capture);
+    auto stream = open_captured_stream(server.port(), capture, std::move(executor));
     if (!wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10))) {
         stream->close();
     }
@@ -1298,6 +1312,138 @@ TEST_F(HttpTest, HttpStream_Reopen_DropsPartialEventOfPreviousResponse) {
     ASSERT_TRUE(wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
 
     EXPECT_EQ(capture->payloads, (std::vector<std::string>{"fresh"}));
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Header of a chunked text/event-stream response
+const std::string chunked_sse_header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+// Runs an io_context on a thread of its own, standing in for an executor an application gives an HttpStream
+struct executor_thread {
+    boost::asio::io_context ioc;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work{ioc.get_executor()};
+    std::thread thread{[this] { ioc.run(); }};
+
+    ~executor_thread() {
+        ioc.stop();
+        thread.join();
+    }
+};
+
+void HttpTest::expect_blocked_callback_does_not_stall(const open_stream_fn& open_other) {
+    scripted_response_server blocking_server{{chunked_sse_header + http_chunk("data: block\n\n"), "0\r\n\r\n"}, std::chrono::milliseconds(20)};
+    scripted_response_server other_server{{chunked_sse_header + http_chunk("data: other\n\n"), "0\r\n\r\n"}, std::chrono::milliseconds(20)};
+
+    struct blocking_state {
+        std::atomic<bool> in_callback{false};
+        std::atomic<bool> release{false};
+        std::atomic<bool> disconnected{false};
+    };
+    // Shared with the callbacks so a stream that outlives this check never touches dead state
+    auto blocking = std::make_shared<blocking_state>();
+    auto blocking_stream = std::make_shared<HttpStream>(
+        std::format("http://127.0.0.1:{}/stream", blocking_server.port()),
+        [] {},
+        [blocking] { blocking->disconnected.store(true, std::memory_order_release); },
+        [blocking](const char*, size_t) {
+            blocking->in_callback.store(true, std::memory_order_release);
+            // Bounded so a stalled second stream fails the test instead of hanging it
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (!blocking->release.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            blocking->in_callback.store(false, std::memory_order_release);
+        },
+        [](std::string) {});
+    blocking_stream->open();
+    ASSERT_TRUE(wait_for_condition([&] { return blocking->in_callback.load(std::memory_order_acquire); }, std::chrono::seconds(10)))
+        << "the blocking stream's onData never ran";
+
+    auto capture = std::make_shared<stream_capture>();
+    auto other_stream = open_other(other_server.port(), capture);
+    const bool other_done = wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(5));
+    const bool still_blocked = blocking->in_callback.load(std::memory_order_acquire);
+    blocking->release.store(true, std::memory_order_release);
+
+    EXPECT_TRUE(still_blocked) << "the blocking callback returned early, so the second stream was not tested against it";
+    EXPECT_TRUE(wait_for_condition([&] { return blocking->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    ASSERT_TRUE(other_done) << "the second stream stalled behind the blocked callback";
+    EXPECT_EQ(capture->payloads, (std::vector<std::string>{"other"}));
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Regression: every HttpStream and all their callbacks ran on one service thread, so a callback that blocked
+// stopped every other stream from receiving data. A stream on its own executor is not held up by it.
+TEST_F(HttpTest, HttpStream_BlockedCallback_DoesNotStallStreamOnOtherExecutor) {
+    executor_thread other_executor;
+    expect_blocked_callback_does_not_stall([&](uint16_t port, std::shared_ptr<stream_capture> capture) {
+        return open_captured_stream(port, std::move(capture), other_executor.ioc.get_executor());
+    });
+}
+
+// With more service threads, a callback that blocks holds up only its own stream on the shared service.
+TEST_F(HttpTest, HttpStream_BlockedCallback_DoesNotStallOtherStreams_ServiceThreads) {
+    struct restore_service_threads {
+        std::size_t count = HttpStream::service_threads();
+        ~restore_service_threads() { HttpStream::set_service_threads(count); }
+    } restore;
+
+    // The thread count applies when the service starts
+    HttpStream::shutdown();
+    HttpStream::set_service_threads(2);
+    EXPECT_EQ(HttpStream::service_threads(), 2u);
+
+    expect_blocked_callback_does_not_stall([&](uint16_t port, std::shared_ptr<stream_capture> capture) {
+        return open_captured_stream(port, std::move(capture));
+    });
+}
+
+// A stream on a multi-threaded executor runs its session and close() through one strand: events arrive whole and
+// in order, close() still interrupts a pending read, and the shared service is never started for it.
+TEST_F(HttpTest, HttpStream_ThreadPoolExecutor_DecodesEventsAndCloses) {
+    HttpStream::shutdown();
+    boost::asio::thread_pool pool{4};
+
+    auto capture = stream_scripted_response({
+        chunked_sse_header,
+        http_chunk("data: first\n\n"),
+        // An event split across chunks
+        http_chunk("data: sec"),
+        http_chunk("ond\n\n"),
+        "0\r\n\r\n",
+    }, std::chrono::milliseconds(20), pool.get_executor());
+    ASSERT_TRUE(capture->disconnected.load(std::memory_order_acquire)) << "stream did not end after the final chunk";
+    EXPECT_EQ(capture->payloads, (std::vector<std::string>{"first", "second"}));
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+
+    scripted_response_server idle_server{{chunked_sse_header, "0\r\n\r\n"}, std::chrono::seconds(30)};
+    auto idle_capture = std::make_shared<stream_capture>();
+    auto stream = open_captured_stream(idle_server.port(), idle_capture, pool.get_executor());
+    ASSERT_TRUE(wait_for_condition([&] { return idle_capture->connected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    // Let the session start waiting on its body read
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    stream->close();
+    ASSERT_TRUE(wait_for_condition([&] { return idle_capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(1)))
+        << "close() did not interrupt the pending read";
+    EXPECT_TRUE(idle_capture->errors.empty()) << idle_capture->errors.front();
+
+    EXPECT_FALSE(HttpStream::is_running()) << "a stream on its own executor started the shared service";
+}
+
+// Regression: shutdown() never cleared the flag marking the service thread as started, so a stream opened after
+// shutdown() was queued on the stopped io_context and never connected.
+TEST_F(HttpTest, HttpStream_OpenAfterShutdown_RestartsService) {
+    const std::string response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 13\r\n\r\ndata: event\n\n";
+    ASSERT_TRUE(stream_scripted_response({response})->disconnected.load(std::memory_order_acquire));
+    EXPECT_TRUE(HttpStream::is_running());
+
+    HttpStream::shutdown();
+    EXPECT_FALSE(HttpStream::is_running());
+
+    auto capture = stream_scripted_response({response});
+    EXPECT_TRUE(HttpStream::is_running());
+    ASSERT_TRUE(capture->disconnected.load(std::memory_order_acquire)) << "stream opened after shutdown() never ran";
+    EXPECT_EQ(capture->payloads, (std::vector<std::string>{"event"}));
     EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
 }
 

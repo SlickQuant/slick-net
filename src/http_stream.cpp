@@ -14,9 +14,13 @@
 #include <boost/asio/connect.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/strand.hpp>
 
+#include <algorithm>
 #include <array>
 #include <thread>
+#include <vector>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -27,10 +31,53 @@ using tcp = boost::asio::ip::tcp;
 namespace slick::net {
 
 namespace {
+    // Shared service that runs every stream constructed without an executor
     asio::io_context ioc_;
-    std::thread service_thread_;
-    std::atomic_bool init_service_thread_{ false };
-    std::atomic_bool run_ {false};
+
+    enum class service_state : std::uint8_t {
+        stopped,
+        starting,   // start_service() is creating the threads
+        running,
+        stopping,   // shutdown() is joining the threads
+    };
+    std::atomic<service_state> service_state_{ service_state::stopped };
+    std::atomic<std::size_t> service_thread_count_{ 1 };
+    // Touched only by the thread that moved service_state_ to starting or stopping, so it needs no lock
+    std::vector<std::thread> service_threads_;
+
+    void run_service_thread() {
+        // Outstanding work keeps run() blocked while idle, so it only returns once shutdown() stops the io_context
+        auto work = asio::make_work_guard(ioc_);
+        for (;;) {
+            try {
+                ioc_.run();
+                return;
+            }
+            catch (const std::exception& ex) {
+                // A throwing handler does not stop the io_context; keep serving the other streams
+                LOG_ERROR("HttpStream service thread error: {}", ex.what());
+            }
+        }
+    }
+
+    // Starts the service threads unless the service is already starting or running. A stream opened while
+    // shutdown() is stopping the service stays queued until a later open() starts it again.
+    void start_service() {
+        auto expected = service_state::stopped;
+        if (!service_state_.compare_exchange_strong(expected, service_state::starting,
+                                                    std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return;
+        }
+
+        // Clear the stop() left by a previous shutdown()
+        ioc_.restart();
+        const auto count = service_thread_count_.load(std::memory_order_acquire);
+        service_threads_.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            service_threads_.emplace_back(run_service_thread);
+        }
+        service_state_.store(service_state::running, std::memory_order_release);
+    }
 
     // A Terminator class to ensure HttpStream::shutdown() is called at program exit
     struct HttpStreamTerminater
@@ -47,7 +94,7 @@ namespace {
 }   // end namespace
 
 // Exposes a session's socket to close() while the session sends its request and reads the response.
-// Created, destroyed and read only on the service thread, so it needs no synchronization.
+// Created, destroyed and read only on the stream's strand, so it needs no synchronization.
 struct HttpStream::socket_registration {
     socket_registration(HttpStream& owner, beast::tcp_stream& socket) noexcept
         : owner(owner)
@@ -75,12 +122,27 @@ HttpStream::HttpStream(
     std::function<void(const char*, std::size_t)> &&onDataCallback,
     std::function<void(std::string err)> &&onErrorCallback,
     std::vector<std::pair<std::string, std::string>>&& headers)
+    : HttpStream(asio::any_io_executor{}, std::move(url), std::move(onConnectedCallback), std::move(onDisconnectedCallback),
+                 std::move(onDataCallback), std::move(onErrorCallback), std::move(headers)) {
+}
+
+HttpStream::HttpStream(
+    asio::any_io_executor executor,
+    std::string url,
+    std::function<void()> &&onConnectedCallback,
+    std::function<void()> &&onDisconnectedCallback,
+    std::function<void(const char*, std::size_t)> &&onDataCallback,
+    std::function<void(std::string err)> &&onErrorCallback,
+    std::vector<std::pair<std::string, std::string>>&& headers)
     : url_(std::move(url))
     , headers_(std::move(headers))
     , on_connected_(std::move(onConnectedCallback))
     , on_disconnected_(std::move(onDisconnectedCallback))
     , on_data_(std::move(onDataCallback))
-    , on_error_(std::move(onErrorCallback)) {
+    , on_error_(std::move(onErrorCallback))
+    // The strand serializes this stream's sessions and close() even on a multi-threaded executor
+    , executor_(executor ? asio::any_io_executor(asio::make_strand(executor)) : asio::any_io_executor(asio::make_strand(ioc_)))
+    , use_service_(!executor) {
     auto [host, target, port, use_ssl] = parse_url(url_);
     host_ = std::move(host);
     target_ = std::move(target);
@@ -91,7 +153,15 @@ HttpStream::HttpStream(
 HttpStream::~HttpStream() = default;
 
 bool HttpStream::is_running() noexcept {
-    return run_.load(std::memory_order_relaxed);
+    return service_state_.load(std::memory_order_relaxed) == service_state::running;
+}
+
+void HttpStream::set_service_threads(std::size_t count) noexcept {
+    service_thread_count_.store(std::max<std::size_t>(count, 1), std::memory_order_release);
+}
+
+std::size_t HttpStream::service_threads() noexcept {
+    return service_thread_count_.load(std::memory_order_acquire);
 }
 
 HttpStream::Status HttpStream::status() const noexcept {
@@ -104,31 +174,14 @@ void HttpStream::open()
     status_.store(Status::CONNECTING, std::memory_order_release);
     should_close_.store(false, std::memory_order_release);
 
-    // Initialize service thread if needed
-    bool expected = false;
-    if (init_service_thread_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
-    {
-        run_.store(true, std::memory_order_release);
-        service_thread_ = std::thread([self = shared_from_this()]() {
-            while (run_.load(std::memory_order_acquire)) {
-                try {
-                    ioc_.run();
-                    if (run_.load(std::memory_order_acquire)) {
-                        ioc_.restart();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    }
-                }
-                catch (const std::exception& ex) {
-                    self->on_error_(std::format("HttpStream service thread error: {}",ex.what()));
-                    ioc_.restart();
-                }
-            }
-        });
+    // A stream on its own executor leaves the shared service alone
+    if (use_service_) {
+        start_service();
     }
 
-    // Start the session - keep object alive with shared_from_this
+    // Start the session on this stream's strand - keep object alive with shared_from_this
     asio::co_spawn(
-        ioc_,
+        executor_,
         do_stream_session(),
         [self = shared_from_this()](std::exception_ptr e) {
             if (e) {
@@ -147,9 +200,9 @@ void HttpStream::close()
     should_close_.store(true, std::memory_order_release);
 
     // A session waiting on a silent server would not see the flag until data arrives, so cancel its pending
-    // I/O on the service thread, the only thread that touches the registered socket. The flag is set first,
+    // I/O on the stream's strand, the only place that touches the registered socket. The flag is set first,
     // so a session that has not started its next read yet sees it and never waits.
-    asio::post(ioc_, [weak_self = weak_from_this()]() {
+    asio::post(executor_, [weak_self = weak_from_this()]() {
         if (auto self = weak_self.lock(); self && self->registered_socket_) {
             self->registered_socket_->socket.cancel();
         }
@@ -157,14 +210,29 @@ void HttpStream::close()
 }
 
 void HttpStream::shutdown() {
-    bool expected = true;
-    if (run_.compare_exchange_strong(expected, false, std::memory_order_acq_rel, std::memory_order_relaxed))
-    {
-        ioc_.stop();
-        if (service_thread_.joinable()) {
-            service_thread_.join();
+    auto state = service_state_.load(std::memory_order_acquire);
+    for (;;) {
+        if (state == service_state::starting) {
+            // start_service() only creates the threads, so it finishes shortly
+            std::this_thread::yield();
+            state = service_state_.load(std::memory_order_acquire);
+        }
+        else if (state != service_state::running) {
+            // Already stopped, or another shutdown() is stopping it
+            return;
+        }
+        else if (service_state_.compare_exchange_weak(state, service_state::stopping,
+                                                      std::memory_order_acq_rel, std::memory_order_acquire)) {
+            break;
         }
     }
+
+    ioc_.stop();
+    for (auto& thread : service_threads_) {
+        thread.join();
+    }
+    service_threads_.clear();
+    service_state_.store(service_state::stopped, std::memory_order_release);
 }
 
 asio::awaitable<void> HttpStream::do_stream_session() {
@@ -329,7 +397,6 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
     // Read body continuously
     while (!parser.is_done() &&
            !should_close_.load(std::memory_order_acquire) &&
-           run_.load(std::memory_order_acquire) &&
            status_.load(std::memory_order_acquire) == Status::CONNECTED)
     {
         auto& body = res.body();
