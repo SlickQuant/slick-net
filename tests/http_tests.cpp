@@ -76,7 +76,8 @@ protected:
 
 // Loopback plain HTTP server that answers every request with "<METHOD> <target>[ host=<Host>][ <body>]",
 // letting a caller verify it received the response to its own request. Targets starting with
-// "/slow" are answered after slow_response_delay; targets starting with "/host" echo the Host header.
+// "/slow" are answered after slow_response_delay; targets starting with "/host" echo the Host header;
+// targets starting with "/header" echo the X-Echo header as "x-echo=<value>".
 class local_echo_server {
 public:
     static constexpr std::chrono::milliseconds slow_response_delay{2000};
@@ -138,6 +139,13 @@ private:
             if (auto pos = request.find("\r\nHost: "); pos < header_end) {
                 pos += 8;
                 echo += " host=";
+                echo.append(request, pos, request.find("\r\n", pos) - pos);
+            }
+        }
+        if (echo.find(" /header") != std::string::npos) {
+            if (auto pos = request.find("\r\nX-Echo: "); pos < header_end) {
+                pos += 10;
+                echo += " x-echo=";
                 echo.append(request, pos, request.find("\r\n", pos) - pos);
             }
         }
@@ -351,6 +359,57 @@ TEST_F(HttpTest, PlainHttp_SyncCallbackAndAwaitable_ReachLoopbackServer) {
     EXPECT_TRUE(awaitable_error.empty()) << awaitable_error;
     EXPECT_EQ(awaitable_response.result_code, 200);
     EXPECT_EQ(awaitable_response.result_text, "POST /host host=127.0.0.1 coro");
+}
+
+// Headers and bodies are moved, not copied, through the session coroutines. Every entry point must
+// still put them on the wire intact (a moved-from argument would arrive empty), and a body far
+// beyond the small-string buffer must round-trip through the request and the response.
+TEST_F(HttpTest, PlainHttp_HeadersAndLargeBody_ForwardedIntactByEveryEntryPoint) {
+    local_echo_server server;
+    const auto url = std::format("http://127.0.0.1:{}/header", server.port());
+    const std::string header_value(256, 'h');
+    std::string body(256 * 1024, '\0');
+    for (std::size_t i = 0; i < body.size(); ++i) {
+        body[i] = static_cast<char>('a' + i % 26);
+    }
+    const auto headers = [&] { return std::vector<std::pair<std::string, std::string>>{{"X-Echo", header_value}}; };
+    const auto expected = [&](std::string_view method) { return std::format("{} /header x-echo={} {}", method, header_value, body); };
+    // Compared with EXPECT_TRUE so a mismatch does not dump a 256 KiB string
+    const auto check = [&](const Http::Response& response, std::string_view method) {
+        EXPECT_EQ(response.result_code, 200) << method << ": " << response.result_text.substr(0, 200);
+        EXPECT_TRUE(response.result_text == expected(method))
+            << method << ": got " << response.result_text.size() << " bytes: " << response.result_text.substr(0, 200);
+    };
+
+    check(Http::post(url, body, headers()), "POST");
+
+    std::atomic<bool> async_done{false};
+    Http::Response async_response;
+    Http::async_patch([&](Http::Response&& r) {
+        async_response = std::move(r);
+        async_done.store(true, std::memory_order_release);
+    }, url, body, headers());
+    ASSERT_TRUE(wait_for_condition([&] { return async_done.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    check(async_response, "PATCH");
+
+    boost::asio::io_context ioc;
+    Http::Response awaitable_response;
+    std::string awaitable_error;
+    auto request = [&]() -> boost::asio::awaitable<void> {
+        awaitable_response = co_await Http::async_put(url, body, headers());
+    };
+    boost::asio::co_spawn(ioc, request(), [&](std::exception_ptr e) {
+        if (e) {
+            try {
+                std::rethrow_exception(e);
+            } catch (const std::exception& ex) {
+                awaitable_error = ex.what();
+            }
+        }
+    });
+    ioc.run();
+    EXPECT_TRUE(awaitable_error.empty()) << awaitable_error;
+    check(awaitable_response, "PUT");
 }
 
 // Regression: parse errors threw out of Http::get/async_get instead of producing an error response,
