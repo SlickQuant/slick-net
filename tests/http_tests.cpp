@@ -166,6 +166,31 @@ TEST_F(HttpTest, SyncRequest_NotBlockedByOtherThreadsSlowRequest) {
     EXPECT_EQ(slow_response.result_text, "GET /slow");
 }
 
+// Regression: synchronous calls ran on a thread_local io_context. On Windows its destructor joins
+// Asio's resolver/timer helper thread under the loader lock, so a thread that had made a synchronous
+// request never finished exiting and joining it hung forever.
+TEST_F(HttpTest, SyncRequest_CallingThreadCanExit) {
+    local_echo_server server;
+    struct outcome {
+        std::atomic<bool> joined{false};
+        Http::Response response;
+    };
+    // Shared with a detached joiner so a regression fails this test instead of hanging it
+    auto state = std::make_shared<outcome>();
+    auto worker = std::make_shared<std::thread>([state, url = std::format("http://127.0.0.1:{}/exit", server.port())] {
+        state->response = Http::get(url);
+    });
+    std::thread([state, worker] {
+        worker->join();
+        state->joined.store(true, std::memory_order_release);
+    }).detach();
+
+    ASSERT_TRUE(wait_for_condition([&] { return state->joined.load(std::memory_order_acquire); }, std::chrono::seconds(10)))
+        << "thread that made a synchronous request did not exit";
+    EXPECT_EQ(state->response.result_code, 200) << state->response.result_text;
+    EXPECT_EQ(state->response.result_text, "GET /exit");
+}
+
 // Regression: all synchronous calls shared one io_context and raced on restart()/run(), so a
 // caller could return an empty response (its run() saw the context stopped by another thread)
 // or have its response written through a dangling reference after returning.
@@ -268,6 +293,48 @@ TEST_F(HttpTest, SyncGet_Ipv6LiteralWithPort) {
     auto response = Http::get(std::format("http://[::1]:{}/host?v=6", server->port()));
     EXPECT_EQ(response.result_code, 200) << response.result_text;
     EXPECT_EQ(response.result_text, "GET /host?v=6 host=[::1]");
+}
+
+// Regression: the session was chosen with `co_await (use_ssl ? ssl_session(std::move(host), ...)
+// : plain_session(std::move(host), ...))`. GCC evaluates both arms there, so the plain session got
+// moved-from arguments and every http:// request failed with "Host not found" while https:// worked.
+TEST_F(HttpTest, PlainHttp_SyncCallbackAndAwaitable_ReachLoopbackServer) {
+    local_echo_server server;
+    const auto url = std::format("http://127.0.0.1:{}/host", server.port());
+
+    auto sync_response = Http::get(url);
+    EXPECT_EQ(sync_response.result_code, 200) << sync_response.result_text;
+    EXPECT_EQ(sync_response.result_text, "GET /host host=127.0.0.1");
+
+    std::atomic<bool> async_done{false};
+    Http::Response async_response;
+    Http::async_put([&](Http::Response&& r) {
+        async_response = std::move(r);
+        async_done.store(true, std::memory_order_release);
+    }, url, "cb");
+    ASSERT_TRUE(wait_for_condition([&] { return async_done.load(std::memory_order_acquire); }, std::chrono::seconds(5)));
+    EXPECT_EQ(async_response.result_code, 200) << async_response.reason;
+    EXPECT_EQ(async_response.result_text, "PUT /host host=127.0.0.1 cb");
+
+    boost::asio::io_context ioc;
+    Http::Response awaitable_response;
+    std::string awaitable_error;
+    auto request = [&]() -> boost::asio::awaitable<void> {
+        awaitable_response = co_await Http::async_post(url, "coro");
+    };
+    boost::asio::co_spawn(ioc, request(), [&](std::exception_ptr e) {
+        if (e) {
+            try {
+                std::rethrow_exception(e);
+            } catch (const std::exception& ex) {
+                awaitable_error = ex.what();
+            }
+        }
+    });
+    ioc.run();
+    EXPECT_TRUE(awaitable_error.empty()) << awaitable_error;
+    EXPECT_EQ(awaitable_response.result_code, 200);
+    EXPECT_EQ(awaitable_response.result_text, "POST /host host=127.0.0.1 coro");
 }
 
 // Regression: parse errors threw out of Http::get/async_get instead of producing an error response,

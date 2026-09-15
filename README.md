@@ -327,7 +327,7 @@ Http::Response patch(std::string_view url, std::string_view data, std::vector<st
 Http::Response del(std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
 ```
 
-Synchronous methods block the calling thread until the response (or an error) arrives and are safe to call concurrently from any number of threads. Each calling thread runs its requests on its own thread-local `io_context`, reused across that thread's calls, so concurrent callers share no state and never lock.
+Synchronous methods block the calling thread until the response (or an error) arrives and are safe to call concurrently from any number of threads. Each call runs on an `io_context` of its own, taken from a small lock-free pool of idle contexts that are reused across calls, so concurrent callers share no state, never lock, and the calling threads can exit normally.
 
 **Asynchronous Callback-Based Methods:**
 ```cpp

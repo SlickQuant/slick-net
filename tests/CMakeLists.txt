@@ -52,14 +52,15 @@ endif()
 
 # ── test discovery ───────────────────────────────────────────────────────────
 # Discover tests at ctest time (PRE_TEST) instead of build time so a slow
-# first launch of a freshly linked exe (AV scan, DLL load) can't fail the build
-gtest_discover_tests(websocket_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
-gtest_discover_tests(websocket_service_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
-gtest_discover_tests(http_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
-gtest_discover_tests(tls_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
-gtest_discover_tests(logging_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
-gtest_discover_tests(signal_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
-gtest_discover_tests(slick_buffer_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST)
+# first launch of a freshly linked exe (AV scan, DLL load) can't fail the build.
+# A per-test TIMEOUT turns a deadlock into a failure instead of hanging the CI job.
+gtest_discover_tests(websocket_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
+gtest_discover_tests(websocket_service_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
+gtest_discover_tests(http_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
+gtest_discover_tests(tls_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
+gtest_discover_tests(logging_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
+gtest_discover_tests(signal_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
+gtest_discover_tests(slick_buffer_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
 
 # Set test properties
 set_target_properties(websocket_tests PROPERTIES

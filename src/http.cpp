@@ -3,6 +3,8 @@
 #include <slick/net/tls.hpp>
 #include "utils.hpp"
 
+#include <array>
+#include <atomic>
 #include <memory>
 #include <utility>
 #include <thread>
@@ -220,9 +222,12 @@ namespace {
         // Parse inside the coroutine so a malformed URL is reported like any other request error
         auto [host, target, port, use_ssl] = parse_url(url);
 
-        co_return co_await (use_ssl
-            ? do_session_ssl_awaitable(std::move(host), std::move(target), std::move(port), method, std::move(headers), std::move(body), version)
-            : do_session_plain_awaitable(std::move(host), std::move(target), std::move(port), method, std::move(headers), std::move(body), version));
+        // Keep if/else: GCC evaluates both arms of a ?: operand of co_await, so the second
+        // call would receive moved-from (empty) arguments and resolve an empty host.
+        if (use_ssl) {
+            co_return co_await do_session_ssl_awaitable(std::move(host), std::move(target), std::move(port), method, std::move(headers), std::move(body), version);
+        }
+        co_return co_await do_session_plain_awaitable(std::move(host), std::move(target), std::move(port), method, std::move(headers), std::move(body), version);
     }
 
     asio::awaitable<void> do_session_ssl(
@@ -267,9 +272,12 @@ namespace {
         // throwing out of async_*() after ensure_service_thread() counted the request
         auto [host, target, port, use_ssl] = parse_url(url);
 
-        co_await (use_ssl
-            ? do_session_ssl(std::move(host), std::move(target), std::move(port), method, std::move(on_response), std::move(headers), std::move(body), version)
-            : do_session_plain(std::move(host), std::move(target), std::move(port), method, std::move(on_response), std::move(headers), std::move(body), version));
+        // if/else, not ?: -- see do_session_awaitable
+        if (use_ssl) {
+            co_await do_session_ssl(std::move(host), std::move(target), std::move(port), method, std::move(on_response), std::move(headers), std::move(body), version);
+        } else {
+            co_await do_session_plain(std::move(host), std::move(target), std::move(port), method, std::move(on_response), std::move(headers), std::move(body), version);
+        }
     }
 
     void async_request_done() {
@@ -355,22 +363,59 @@ namespace {
         return res;
     }
 
+    // Idle io_contexts for synchronous calls. Every call runs a context of its own, so concurrent
+    // (or nested) calls need no synchronization and run() returns as soon as that call's request is
+    // done; parking contexts keeps their reactor, timer and resolver services alive across calls.
+    // Never make the context thread_local: on Windows the destructor of an io_context that has used
+    // a timer or resolver joins Asio's helper thread, which deadlocks under the loader lock that
+    // thread_local destructors run with, so the calling thread could never exit.
+    class sync_context_pool {
+    public:
+        ~sync_context_pool() {
+            for (auto& slot : slots_) {
+                delete slot.load(std::memory_order_relaxed);
+            }
+        }
+
+        // Claims a parked context, or creates one when none is parked
+        std::unique_ptr<asio::io_context> acquire() {
+            for (auto& slot : slots_) {
+                if (slot.load(std::memory_order_relaxed)) {
+                    if (auto* ioc = slot.exchange(nullptr, std::memory_order_acq_rel)) {
+                        return std::unique_ptr<asio::io_context>(ioc);
+                    }
+                }
+            }
+            return std::make_unique<asio::io_context>();
+        }
+
+        // Parks a context in a free slot, or destroys it when every slot is taken
+        void release(std::unique_ptr<asio::io_context> ioc) {
+            for (auto& slot : slots_) {
+                asio::io_context* empty = nullptr;
+                if (!slot.load(std::memory_order_relaxed) &&
+                    slot.compare_exchange_strong(empty, ioc.get(), std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                    ioc.release();
+                    return;
+                }
+            }
+        }
+
+    private:
+        std::array<std::atomic<asio::io_context*>, 16> slots_{};
+    };
+    sync_context_pool sync_contexts_;
+
     Response sync_request(
         std::string_view url,
         http::verb method,
         std::vector<std::pair<std::string, std::string>>&& headers,
         std::string_view body = {})
     {
-        // One io_context per calling thread: concurrent synchronous calls never share one, so they
-        // need no synchronization, and run() returns as soon as this thread's own request is done.
-        // Reusing it keeps the reactor, timer and resolver services alive across calls.
-        thread_local asio::io_context ioc;
-        if (ioc.get_executor().running_in_this_thread()) [[unlikely]] {
-            // Nested call from code executing inside this thread's request (e.g. a log handler)
-            asio::io_context nested_ioc;
-            return run_sync_request(nested_ioc, url, method, std::move(headers), body);
-        }
-        return run_sync_request(ioc, url, method, std::move(headers), body);
+        auto ioc = sync_contexts_.acquire();
+        auto res = run_sync_request(*ioc, url, method, std::move(headers), body);
+        sync_contexts_.release(std::move(ioc));
+        return res;
     }
 
 } // namespace
