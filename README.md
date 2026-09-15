@@ -74,6 +74,19 @@ cmake -B build \
   -DLINK_STATICALLY=ON
 ```
 
+#### Native CPU optimizations
+
+Release builds are portable by default. Pass `-DSLICK_NET_ENABLE_NATIVE_ARCH=ON` to compile the
+library with `-march=native` (GCC/Clang only; ignored on MSVC and when cross-compiling):
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSLICK_NET_ENABLE_NATIVE_ARCH=ON
+```
+
+Only enable this when the binary runs on the machine that built it — `-march=native` bakes in the
+build host's instruction set, and the resulting artifacts crash with an illegal-instruction fault on
+any CPU that lacks those extensions.
+
 ### CMake Integration
 
 Add slick-net as a subdirectory in your CMake project:

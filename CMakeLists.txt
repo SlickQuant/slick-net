@@ -27,6 +27,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(BUILD_SLICK_NET_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 option(BUILD_SLICK_NET_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
 option(SLICK_NET_ENABLE_SOURCE_LOCATION "Enable LOG_* macro source-location capture" ON)
+# OFF by default: -march=native bakes the build machine's ISA into Release artifacts, so they
+# fault on any older CPU. Opt in only when the binary runs on the machine that built it.
+option(SLICK_NET_ENABLE_NATIVE_ARCH "Build Release with -march=native (non-portable binaries)" OFF)
 
 if (LINK_STATICALLY)
     set(Boost_USE_STATIC_LIBS ON)
@@ -141,7 +144,7 @@ if (MSVC)
     if (LINK_STATICALLY)
         set_target_properties(slick-net PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
-elseif(NOT CMAKE_CROSSCOMPILING)
+elseif(SLICK_NET_ENABLE_NATIVE_ARCH AND NOT CMAKE_CROSSCOMPILING)
     target_compile_options(slick-net PRIVATE $<$<CONFIG:Release>:-march=native>)
 endif()
 
