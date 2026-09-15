@@ -14,6 +14,8 @@
 
 #include <boost/asio/awaitable.hpp>
 
+#include <slick/net/detail/sse_parser.hpp>
+
 namespace slick::net {
 
 class HttpStream : public std::enable_shared_from_this<HttpStream> {
@@ -56,7 +58,6 @@ private:
     boost::asio::awaitable<void> do_stream_session_plain();
     template <typename Stream>
     boost::asio::awaitable<bool> stream_response(Stream& stream);
-    void parse_sse_chunk(const char* data, size_t size);
 
 private:
     std::string url_;
@@ -71,7 +72,7 @@ private:
     std::function<void(std::string err)> on_error_;
     std::atomic<Status> status_{ Status::DISCONNECTED };
     std::atomic_bool should_close_{false};
-    std::string sse_buffer_;  // For incomplete SSE events
+    detail::sse_parser sse_parser_;  // Parses text/event-stream bodies; service thread only
     socket_registration* registered_socket_ = nullptr;  // Socket close() cancels; service thread only
 };
 

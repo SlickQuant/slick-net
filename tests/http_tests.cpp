@@ -13,6 +13,7 @@
 // #define LOG_ERROR(fmt, ...) std::cout << std::format("{:%Y-%m-%d %H:%M:%S} ", std::chrono::system_clock::now()) << "[ERROR] " << std::format(fmt, __VA_ARGS__) << std::endl
 
 #include <slick/net/http.hpp>
+#include <slick/net/detail/sse_parser.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/as_tuple.hpp>
@@ -1035,13 +1036,21 @@ TEST_F(HttpTest, HttpStream_StatusCheck) {
     EXPECT_EQ(stream->status(), HttpStream::Status::DISCONNECTED);
 }
 
-// Loopback plain HTTP server that answers a single request by writing the given raw response segments,
-// pausing between them so the client receives each one in a separate read.
+// Loopback plain HTTP server that answers each connection it accepts, in turn, with the next scripted response,
+// writing its raw segments and pausing between them so the client receives each one in a separate read.
 class scripted_response_server {
 public:
+    // Selects the constructor taking one response per connection
+    struct per_connection_t {};
+
+    // Answers a single connection
     explicit scripted_response_server(std::vector<std::string> segments,
                                       std::chrono::milliseconds pause = std::chrono::milliseconds(20))
-        : segments_(std::move(segments))
+        : scripted_response_server(per_connection_t{}, {std::move(segments)}, pause) {}
+
+    scripted_response_server(per_connection_t, std::vector<std::vector<std::string>> responses,
+                             std::chrono::milliseconds pause = std::chrono::milliseconds(20))
+        : responses_(std::move(responses))
         , pause_(pause)
         , acceptor_(ioc_, {boost::asio::ip::address_v4::loopback(), 0})
         , port_(acceptor_.local_endpoint().port()) {
@@ -1059,34 +1068,36 @@ public:
 private:
     boost::asio::awaitable<void> serve() {
         const auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
-        auto [accept_ec, socket] = co_await acceptor_.async_accept(token);
-        if (accept_ec) {
-            co_return;
-        }
-        // Keep each segment in its own TCP segment instead of letting Nagle coalesce them
-        socket.set_option(boost::asio::ip::tcp::no_delay(true));
-
-        std::string request;
-        if (auto [ec, n] = co_await boost::asio::async_read_until(socket, boost::asio::dynamic_buffer(request), "\r\n\r\n", token); ec) {
-            co_return;
-        }
-
-        boost::asio::steady_timer timer{socket.get_executor()};
-        for (std::size_t i = 0; i < segments_.size(); ++i) {
-            if (i > 0) {
-                timer.expires_after(pause_);
-                co_await timer.async_wait(token);
-            }
-            if (auto [ec, n] = co_await boost::asio::async_write(socket, boost::asio::buffer(segments_[i]), token); ec) {
+        for (const auto& segments : responses_) {
+            auto [accept_ec, socket] = co_await acceptor_.async_accept(token);
+            if (accept_ec) {
                 co_return;
             }
+            // Keep each segment in its own TCP segment instead of letting Nagle coalesce them
+            socket.set_option(boost::asio::ip::tcp::no_delay(true));
+
+            std::string request;
+            if (auto [ec, n] = co_await boost::asio::async_read_until(socket, boost::asio::dynamic_buffer(request), "\r\n\r\n", token); ec) {
+                co_return;
+            }
+
+            boost::asio::steady_timer timer{socket.get_executor()};
+            for (std::size_t i = 0; i < segments.size(); ++i) {
+                if (i > 0) {
+                    timer.expires_after(pause_);
+                    co_await timer.async_wait(token);
+                }
+                if (auto [ec, n] = co_await boost::asio::async_write(socket, boost::asio::buffer(segments[i]), token); ec) {
+                    co_return;
+                }
+            }
+            boost::system::error_code ec;
+            socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
         }
-        boost::system::error_code ec;
-        socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
     }
 
     boost::asio::io_context ioc_;
-    std::vector<std::string> segments_;
+    std::vector<std::vector<std::string>> responses_;
     std::chrono::milliseconds pause_;
     boost::asio::ip::tcp::acceptor acceptor_;
     uint16_t port_;
@@ -1208,6 +1219,107 @@ TEST_F(HttpTest, HttpStream_Close_InterruptsIdleRead) {
 
     EXPECT_LT(elapsed_ms, 1000) << "close() waited for the pending read to time out";
     EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Regression: the parser kept a partial event across responses, so after a response ended inside an event
+// the reopened stream joined that event's data to the first event of the next response.
+TEST_F(HttpTest, HttpStream_Reopen_DropsPartialEventOfPreviousResponse) {
+    const std::string header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+    // Neither body has a length, so each ends when the server closes the connection
+    scripted_response_server server{scripted_response_server::per_connection_t{}, {
+        {header + "data: stale"},
+        {header + "data: fresh\n\n"},
+    }};
+    auto capture = std::make_shared<stream_capture>();
+    auto stream = open_captured_stream(server.port(), capture);
+    ASSERT_TRUE(wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+
+    capture->disconnected.store(false, std::memory_order_release);
+    stream->open();
+    ASSERT_TRUE(wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+
+    EXPECT_EQ(capture->payloads, (std::vector<std::string>{"fresh"}));
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Splits stream into pieces of piece_size bytes, the last one possibly shorter
+std::vector<std::string_view> sse_pieces(std::string_view stream, std::size_t piece_size) {
+    std::vector<std::string_view> pieces;
+    pieces.reserve(stream.size() / piece_size + 1);
+    for (std::size_t offset = 0; offset < stream.size(); offset += piece_size) {
+        pieces.push_back(stream.substr(offset, piece_size));
+    }
+    return pieces;
+}
+
+// Feeds pieces to a fresh sse_parser in order and returns the events it dispatched
+std::vector<std::string> parse_sse_pieces(const std::vector<std::string_view>& pieces) {
+    detail::sse_parser parser;
+    std::vector<std::string> events;
+    for (const auto piece : pieces) {
+        parser.feed(piece.data(), piece.size(), [&](const char* data, std::size_t size) { events.emplace_back(data, size); });
+    }
+    return events;
+}
+
+// Regression: a CR ending one piece was turned into LF before the LF opening the next piece arrived, so the
+// split CRLF read as a blank line and ended the event early.
+TEST_F(HttpTest, SseParser_CrlfSplitAcrossPieces_IsOneLineEnding) {
+    EXPECT_EQ(parse_sse_pieces({"data: a\r", "\ndata: b\r", "\n\r", "\n"}), (std::vector<std::string>{"a\nb"}));
+    // A CR ending a piece is still a line ending when the next piece does not open with LF
+    EXPECT_EQ(parse_sse_pieces({"data: a\r", "data: b\r", "\r"}), (std::vector<std::string>{"a\nb"}));
+}
+
+// Splitting a stream anywhere, or feeding it a byte at a time, gives the same events as parsing it whole.
+TEST_F(HttpTest, SseParser_AnySplit_MatchesWholeStream) {
+    const std::string_view stream =
+        ": comment\r\n"
+        "event: update\r\n"
+        "data: first\r\n"
+        "data:second\r\n"
+        "id: 1\r\n"
+        "\r\n"
+        "data: lf\n"
+        "\n"
+        "data: cr\r"
+        "\r"
+        "data:\n"
+        "data:  two spaces\n"
+        "\n"
+        "dat: not data\n"
+        "data\n"
+        "\n"
+        "data: last\r\n"
+        "\r\n";
+    const std::vector<std::string> expected{"first\nsecond", "lf", "cr", " two spaces", "last"};
+
+    ASSERT_EQ(parse_sse_pieces({stream}), expected);
+    for (std::size_t split = 1; split < stream.size(); ++split) {
+        EXPECT_EQ(parse_sse_pieces({stream.substr(0, split), stream.substr(split)}), expected) << "split at " << split;
+    }
+    EXPECT_EQ(parse_sse_pieces(sse_pieces(stream, 1)), expected);
+}
+
+// Regression: every piece rescanned and erased from the whole retained buffer, so an event arriving in many
+// small pieces took time quadratic in its size (hours for this one). Parsing is now linear and takes well
+// under a second here; the per-test timeout catches a regression.
+TEST_F(HttpTest, SseParser_LargeEventInSmallPieces_ParsesInLinearTime) {
+    const std::string value(58, 'x');
+    std::string stream;
+    std::string expected;
+    for (int line = 0; line < 16384; ++line) {  // 1 MiB of 64-byte CRLF-terminated data lines
+        stream.append("data: ").append(value).append("\r\n");
+        if (line > 0) {
+            expected.push_back('\n');
+        }
+        expected.append(value);
+    }
+    stream.append("\r\n");
+
+    // Byte-sized pieces also split every CRLF
+    const auto events = parse_sse_pieces(sse_pieces(stream, 1));
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_TRUE(events.front() == expected) << "event of " << events.front().size() << " bytes differs";
 }
 
 // ======================== Awaitable GET Tests ========================

@@ -320,6 +320,9 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
     // Check if this is SSE format
     const bool is_sse = res[http::field::content_type].find("text/event-stream") != std::string::npos;
 
+    // Drop any partial event an earlier response of this stream ended in, so it is not joined to this body
+    sse_parser_.reset();
+
     // Body bytes async_read_header read past the header stay in buffer and are parsed by the first read
     std::array<char, 8192> body_buf;
 
@@ -341,7 +344,7 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
         // Deliver what was decoded, even if the read then stopped with an error
         if (const auto decoded = body_buf.size() - body.size; decoded > 0) {
             if (is_sse) {
-                parse_sse_chunk(body_buf.data(), decoded);
+                sse_parser_.feed(body_buf.data(), decoded, on_data_);
             } else {
                 on_data_(body_buf.data(), decoded);
             }
@@ -367,60 +370,6 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
         LOG_INFO("HTTP Stream ended");
     }
     co_return true;
-}
-
-void HttpStream::parse_sse_chunk(const char* data, size_t size) {
-    // Append new data to buffer
-    sse_buffer_.append(data, size);
-
-    // Normalize CRLF and bare CR to LF so event/line splitting is uniform
-    for (size_t i = 0; i < sse_buffer_.size(); ) {
-        if (sse_buffer_[i] == '\r') {
-            if (i + 1 < sse_buffer_.size() && sse_buffer_[i + 1] == '\n') {
-                sse_buffer_.erase(i, 1); // remove \r, keep \n
-            } else {
-                sse_buffer_[i] = '\n'; // bare \r -> \n
-                ++i;
-            }
-        } else {
-            ++i;
-        }
-    }
-
-    // Process complete events (separated by double newline)
-    size_t pos = 0;
-    while ((pos = sse_buffer_.find("\n\n")) != std::string::npos) {
-        std::string event = sse_buffer_.substr(0, pos);
-        sse_buffer_.erase(0, pos + 2);
-
-        // Parse SSE event fields
-        std::string event_data;
-        std::istringstream iss(event);
-        std::string line;
-
-        while (std::getline(iss, line)) {
-            if (line.empty() || line[0] == ':') {
-                continue; // Skip empty lines and comments
-            }
-
-            if (line.starts_with("data:")) {
-                std::string data_line = line.substr(5);
-                if (!data_line.empty() && data_line[0] == ' ') {
-                    data_line = data_line.substr(1);
-                }
-                if (!event_data.empty()) {
-                    event_data += '\n';
-                }
-                event_data += data_line;
-            }
-            // We could also parse event:, id:, retry: fields if needed
-        }
-
-        // Deliver the parsed event data
-        if (!event_data.empty()) {
-            on_data_(event_data.data(), event_data.size());
-        }
-    }
 }
 
 }   // end namespace slick::net
