@@ -54,6 +54,21 @@ protected:
         }
         return pred();
     }
+
+    // What an HttpStream delivered; payloads and errors are only safe to read once disconnected is set
+    struct stream_capture {
+        std::atomic<bool> connected{false};
+        std::atomic<bool> disconnected{false};
+        std::vector<std::string> payloads;
+        std::vector<std::string> errors;
+    };
+
+    // Opens an HttpStream to a loopback plain HTTP server on port that records what it delivers into capture
+    std::shared_ptr<HttpStream> open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture);
+
+    // Streams a scripted_response_server's response, pausing between segments, and waits for the stream to disconnect
+    std::shared_ptr<stream_capture> stream_scripted_response(std::vector<std::string> segments,
+                                                             std::chrono::milliseconds pause = std::chrono::milliseconds(20));
 };
 
 // ======================== Concurrent Synchronous Request Tests ========================
@@ -1018,6 +1033,181 @@ TEST_F(HttpTest, HttpStream_StatusCheck) {
                                     std::chrono::seconds(5)));
 
     EXPECT_EQ(stream->status(), HttpStream::Status::DISCONNECTED);
+}
+
+// Loopback plain HTTP server that answers a single request by writing the given raw response segments,
+// pausing between them so the client receives each one in a separate read.
+class scripted_response_server {
+public:
+    explicit scripted_response_server(std::vector<std::string> segments,
+                                      std::chrono::milliseconds pause = std::chrono::milliseconds(20))
+        : segments_(std::move(segments))
+        , pause_(pause)
+        , acceptor_(ioc_, {boost::asio::ip::address_v4::loopback(), 0})
+        , port_(acceptor_.local_endpoint().port()) {
+        boost::asio::co_spawn(ioc_, serve(), boost::asio::detached);
+        thread_ = std::thread([this] { ioc_.run(); });
+    }
+
+    ~scripted_response_server() {
+        ioc_.stop();
+        thread_.join();
+    }
+
+    uint16_t port() const noexcept { return port_; }
+
+private:
+    boost::asio::awaitable<void> serve() {
+        const auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
+        auto [accept_ec, socket] = co_await acceptor_.async_accept(token);
+        if (accept_ec) {
+            co_return;
+        }
+        // Keep each segment in its own TCP segment instead of letting Nagle coalesce them
+        socket.set_option(boost::asio::ip::tcp::no_delay(true));
+
+        std::string request;
+        if (auto [ec, n] = co_await boost::asio::async_read_until(socket, boost::asio::dynamic_buffer(request), "\r\n\r\n", token); ec) {
+            co_return;
+        }
+
+        boost::asio::steady_timer timer{socket.get_executor()};
+        for (std::size_t i = 0; i < segments_.size(); ++i) {
+            if (i > 0) {
+                timer.expires_after(pause_);
+                co_await timer.async_wait(token);
+            }
+            if (auto [ec, n] = co_await boost::asio::async_write(socket, boost::asio::buffer(segments_[i]), token); ec) {
+                co_return;
+            }
+        }
+        boost::system::error_code ec;
+        socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+    }
+
+    boost::asio::io_context ioc_;
+    std::vector<std::string> segments_;
+    std::chrono::milliseconds pause_;
+    boost::asio::ip::tcp::acceptor acceptor_;
+    uint16_t port_;
+    std::thread thread_;
+};
+
+std::shared_ptr<HttpStream> HttpTest::open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture) {
+    // Callbacks share ownership so a stream that outlives its test never touches a dead capture
+    auto stream = std::make_shared<HttpStream>(
+        std::format("http://127.0.0.1:{}/stream", port),
+        [capture] { capture->connected.store(true, std::memory_order_release); },
+        [capture] { capture->disconnected.store(true, std::memory_order_release); },
+        [capture](const char* data, size_t size) { capture->payloads.emplace_back(data, size); },
+        [capture](std::string err) { capture->errors.push_back(std::move(err)); }
+    );
+    stream->open();
+    return stream;
+}
+
+std::shared_ptr<HttpTest::stream_capture> HttpTest::stream_scripted_response(std::vector<std::string> segments,
+                                                                             std::chrono::milliseconds pause) {
+    scripted_response_server server{std::move(segments), pause};
+    auto capture = std::make_shared<stream_capture>();
+    auto stream = open_captured_stream(server.port(), capture);
+    if (!wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10))) {
+        stream->close();
+    }
+    return capture;
+}
+
+// Formats one chunk of a chunked transfer-coded body
+std::string http_chunk(std::string_view data, std::string_view extension = {}) {
+    return std::format("{:x}{}\r\n{}\r\n", data.size(), extension, data);
+}
+
+// Regression: after the header HttpStream read raw socket bytes, so a chunked non-SSE body reached
+// onData with its chunk sizes, chunk extensions and trailers still in it.
+TEST_F(HttpTest, HttpStream_ChunkedBody_DeliversDecodedBytes) {
+    const std::string large(20000, 'x');  // larger than HttpStream's body buffer, so it is delivered in pieces
+    auto capture = stream_scripted_response({
+        // The first chunk arrives with the header, so it is read along with it
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n" + http_chunk("hello"),
+        http_chunk(" world", ";name=value"),
+        // A chunk split across reads
+        "a\r\n0123",
+        "456789\r\n",
+        http_chunk(large),
+        "0\r\nX-Trailer: done\r\n\r\n",
+    });
+
+    ASSERT_TRUE(capture->disconnected.load(std::memory_order_acquire)) << "stream did not end after the final chunk";
+    std::string body;
+    for (const auto& payload : capture->payloads) {
+        body += payload;
+    }
+    EXPECT_EQ(body, "hello world0123456789" + large);
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Regression: chunk framing was fed into the SSE parser along with the event text.
+TEST_F(HttpTest, HttpStream_ChunkedSse_DecodesEventsAcrossChunks) {
+    auto capture = stream_scripted_response({
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        http_chunk("data: first\n\n"),
+        // An event split across chunks
+        http_chunk("data: sec"),
+        http_chunk("ond\n\n", ";x=y"),
+        "0\r\n\r\n",
+    });
+
+    ASSERT_TRUE(capture->disconnected.load(std::memory_order_acquire)) << "stream did not end after the final chunk";
+    EXPECT_EQ(capture->payloads, (std::vector<std::string>{"first", "second"}));
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// A chunked body cut off before its final chunk is reported rather than treated as a normal end.
+TEST_F(HttpTest, HttpStream_TruncatedChunkedBody_ReportsError) {
+    auto capture = stream_scripted_response({
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
+        http_chunk("partial"),
+    });
+
+    ASSERT_TRUE(capture->disconnected.load(std::memory_order_acquire)) << "stream did not end when the server closed";
+    ASSERT_EQ(capture->payloads.size(), 1u);
+    EXPECT_EQ(capture->payloads.front(), "partial");
+    EXPECT_FALSE(capture->errors.empty());
+}
+
+// Regression: each body read had a 2 s timeout so close() was noticed, but Beast closes the socket when a
+// timeout fires, so a stream that received nothing for 2 s failed its next read and disconnected.
+TEST_F(HttpTest, HttpStream_IdleStream_StaysOpen) {
+    auto capture = stream_scripted_response({
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n" + http_chunk("data: before\n\n"),
+        http_chunk("data: after\n\n") + "0\r\n\r\n",
+    }, std::chrono::milliseconds(3000));
+
+    ASSERT_TRUE(capture->disconnected.load(std::memory_order_acquire)) << "stream did not end after the final chunk";
+    EXPECT_EQ(capture->payloads, (std::vector<std::string>{"before", "after"}));
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// close() cancels a read waiting on a silent server instead of leaving it until data or a timeout arrives.
+TEST_F(HttpTest, HttpStream_Close_InterruptsIdleRead) {
+    scripted_response_server server{{
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "0\r\n\r\n",
+    }, std::chrono::seconds(30)};
+    auto capture = std::make_shared<stream_capture>();
+    auto stream = open_captured_stream(server.port(), capture);
+
+    ASSERT_TRUE(wait_for_condition([&] { return capture->connected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    // Let the session start waiting on its body read
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto begin = std::chrono::steady_clock::now();
+    stream->close();
+    ASSERT_TRUE(wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+
+    EXPECT_LT(elapsed_ms, 1000) << "close() waited for the pending read to time out";
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
 }
 
 // ======================== Awaitable GET Tests ========================

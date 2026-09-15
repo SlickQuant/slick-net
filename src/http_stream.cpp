@@ -15,6 +15,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/as_tuple.hpp>
 
+#include <array>
 #include <thread>
 
 namespace beast = boost::beast;
@@ -36,7 +37,7 @@ namespace {
     {
         HttpStreamTerminater() {
         }
-        
+
         ~HttpStreamTerminater() {
             HttpStream::shutdown();
         }
@@ -44,6 +45,28 @@ namespace {
 
     static HttpStreamTerminater s_http_stream_terminater;
 }   // end namespace
+
+// Exposes a session's socket to close() while the session sends its request and reads the response.
+// Created, destroyed and read only on the service thread, so it needs no synchronization.
+struct HttpStream::socket_registration {
+    socket_registration(HttpStream& owner, beast::tcp_stream& socket) noexcept
+        : owner(owner)
+        , socket(socket) {
+        owner.registered_socket_ = this;
+    }
+
+    ~socket_registration() {
+        if (owner.registered_socket_ == this) {
+            owner.registered_socket_ = nullptr;
+        }
+    }
+
+    socket_registration(const socket_registration&) = delete;
+    socket_registration& operator=(const socket_registration&) = delete;
+
+    HttpStream& owner;
+    beast::tcp_stream& socket;
+};
 
 HttpStream::HttpStream(
     std::string url,
@@ -122,6 +145,15 @@ void HttpStream::close()
 {
     LOG_INFO("Closing HTTP Stream {}", url_);
     should_close_.store(true, std::memory_order_release);
+
+    // A session waiting on a silent server would not see the flag until data arrives, so cancel its pending
+    // I/O on the service thread, the only thread that touches the registered socket. The flag is set first,
+    // so a session that has not started its next read yet sees it and never waits.
+    asio::post(ioc_, [weak_self = weak_from_this()]() {
+        if (auto self = weak_self.lock(); self && self->registered_socket_) {
+            self->registered_socket_->socket.cancel();
+        }
+    });
 }
 
 void HttpStream::shutdown() {
@@ -174,126 +206,22 @@ asio::awaitable<void> HttpStream::do_stream_session_ssl() {
             detail::throw_tls_handshake_error(stream.native_handle(), ec);
         }
 
-        // Set up an HTTP GET request for streaming
-        http::request<http::string_body> req{ http::verb::get, target_, 11 };
-        req.set(http::field::host, detail::format_authority(host_));
-        req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
-        req.set(http::field::accept, "text/event-stream");
-        req.set(http::field::cache_control, "no-cache");
+        if (co_await stream_response(stream)) {
+            // Graceful shutdown
+            beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(5));
+            auto [ec] = co_await stream.async_shutdown(asio::as_tuple);
 
-        // Set custom headers
-        for (auto &header_pair : headers_) {
-            req.set(header_pair.first, header_pair.second);
-        }
-
-        // Disable timeout for streaming
-        beast::get_lowest_layer(stream).expires_never();
-
-        // Send the HTTP request
-        co_await http::async_write(stream, req);
-
-        // Read response header first
-        beast::flat_buffer buffer;
-        http::response_parser<http::dynamic_body> parser;
-        parser.body_limit(std::numeric_limits<std::uint64_t>::max());
-
-        // Read just the header
-        co_await http::async_read_header(stream, buffer, parser);
-
-        auto& res = parser.get();
-
-        if (res.result() != http::status::ok) {
-            LOG_ERROR("HTTP Stream failed with status: {}", static_cast<int>(res.result()));
-            on_error_(std::format("HTTP error: {}", std::string(res.reason())));
-            status_.store(Status::DISCONNECTED, std::memory_order_release);
-            on_disconnected_();
-            co_return;
-        }
-
-        // Connection established successfully
-        status_.store(Status::CONNECTED, std::memory_order_release);
-        on_connected_();
-
-        // Check if this is SSE format
-        bool is_sse = false;
-        auto content_type = res[http::field::content_type];
-        if (content_type.find("text/event-stream") != std::string::npos) {
-            is_sse = true;
-        }
-
-        // async_read_header may have read body bytes past the headers into buffer.
-        // Deliver them now so they are not lost if the first async_read_some times out.
-        if (buffer.size() > 0) {
-            auto pre = beast::buffers_to_string(buffer.data());
-            buffer.consume(buffer.size());
-            if (is_sse) {
-                parse_sse_chunk(pre.data(), pre.size());
-            } else {
-                on_data_(pre.data(), pre.size());
+            if(ec && ec != asio::ssl::error::stream_truncated) {
+                LOG_WARN("SSL shutdown warning: {}", ec.message());
             }
-        }
-
-        // Read body chunks continuously
-        while (!should_close_.load(std::memory_order_acquire) &&
-               run_.load(std::memory_order_acquire) &&
-               status_.load(std::memory_order_acquire) == Status::CONNECTED)
-        {
-            // Short timeout so close() is noticed promptly even if no data arrives
-            beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(2));
-
-            // Read some data from the stream
-            auto [ec, bytes_transferred] = co_await stream.async_read_some(
-                buffer.prepare(8192),
-                asio::as_tuple(asio::use_awaitable)
-            );
-
-            if (ec == beast::error::timeout || ec == asio::error::operation_aborted) {
-                // Timed out waiting for data — check close flag and retry
-                if (should_close_.load(std::memory_order_acquire)) break;
-                continue;
-            }
-
-            if (ec == http::error::end_of_stream || ec == asio::error::eof) {
-                // Stream ended gracefully
-                LOG_INFO("HTTP Stream ended");
-                break;
-            }
-            else if (ec) {
-                LOG_ERROR("HTTP Stream read error: {}", ec.message());
-                on_error_(ec.message());
-                break;
-            }
-
-            // Commit the received data to the buffer
-            buffer.commit(bytes_transferred);
-
-            // Convert buffer to string
-            auto data_view = beast::buffers_to_string(buffer.data());
-
-            if (!data_view.empty()) {
-                if (is_sse) {
-                    parse_sse_chunk(data_view.data(), data_view.size());
-                } else {
-                    // Raw chunked data
-                    on_data_(data_view.data(), data_view.size());
-                }
-
-                // Clear the consumed data
-                buffer.consume(buffer.size());
-            }
-        }
-
-        // Graceful shutdown
-        beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(5));
-        auto [ec] = co_await stream.async_shutdown(asio::as_tuple);
-
-        if(ec && ec != asio::ssl::error::stream_truncated) {
-            LOG_WARN("SSL shutdown warning: {}", ec.message());
         }
     }
     catch (const std::exception& e) {
-        LOG_ERROR("HttpStream exception: {}", e.what());
-        on_error_(e.what());
+        // After close() this is the cancelled request or header read, not a failure
+        if (!should_close_.load(std::memory_order_acquire)) {
+            LOG_ERROR("HttpStream exception: {}", e.what());
+            on_error_(e.what());
+        }
     }
 
     status_.store(Status::DISCONNECTED, std::memory_order_release);
@@ -315,131 +243,130 @@ asio::awaitable<void> HttpStream::do_stream_session_plain() {
         // Make the connection
         co_await stream.async_connect(results);
 
-        // Set up an HTTP GET request for streaming
-        http::request<http::string_body> req{ http::verb::get, target_, 11 };
-        req.set(http::field::host, detail::format_authority(host_));
-        req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
-        req.set(http::field::accept, "text/event-stream");
-        req.set(http::field::cache_control, "no-cache");
+        if (co_await stream_response(stream)) {
+            // Graceful shutdown
+            stream.expires_after(std::chrono::seconds(5));
+            beast::error_code ec;
+            stream.socket().shutdown(tcp::socket::shutdown_both, ec);
 
-        // Set custom headers
-        for (auto &header_pair : headers_) {
-            req.set(header_pair.first, header_pair.second);
-        }
-
-        // Disable timeout for streaming
-        stream.expires_never();
-
-        // Send the HTTP request
-        co_await http::async_write(stream, req);
-
-        // Read response header first
-        beast::flat_buffer buffer;
-        http::response_parser<http::dynamic_body> parser;
-        parser.body_limit(std::numeric_limits<std::uint64_t>::max());
-
-        // Read just the header
-        co_await http::async_read_header(stream, buffer, parser);
-
-        auto& res = parser.get();
-
-        if (res.result() != http::status::ok) {
-            LOG_ERROR("HTTP Stream failed with status: {}", static_cast<int>(res.result()));
-            on_error_(std::format("HTTP error: {}", std::string(res.reason())));
-            status_.store(Status::DISCONNECTED, std::memory_order_release);
-            on_disconnected_();
-            co_return;
-        }
-
-        // Connection established successfully
-        status_.store(Status::CONNECTED, std::memory_order_release);
-        on_connected_();
-
-        // Check if this is SSE format
-        bool is_sse = false;
-        auto content_type = res[http::field::content_type];
-        if (content_type.find("text/event-stream") != std::string::npos) {
-            is_sse = true;
-        }
-
-        // async_read_header may have read body bytes past the headers into buffer.
-        // Deliver them now so they are not lost if the first async_read_some times out.
-        if (buffer.size() > 0) {
-            auto pre = beast::buffers_to_string(buffer.data());
-            buffer.consume(buffer.size());
-            if (is_sse) {
-                parse_sse_chunk(pre.data(), pre.size());
-            } else {
-                on_data_(pre.data(), pre.size());
+            if(ec && ec != beast::errc::not_connected) {
+                LOG_WARN("Socket shutdown warning: {}", ec.message());
             }
-        }
-
-        // Read body chunks continuously
-        while (!should_close_.load(std::memory_order_acquire) &&
-               run_.load(std::memory_order_acquire) &&
-               status_.load(std::memory_order_acquire) == Status::CONNECTED)
-        {
-            // Short timeout so close() is noticed promptly even if no data arrives
-            stream.expires_after(std::chrono::seconds(2));
-
-            // Read some data from the stream
-            auto [ec, bytes_transferred] = co_await stream.async_read_some(
-                buffer.prepare(8192),
-                asio::as_tuple(asio::use_awaitable)
-            );
-
-            if (ec == beast::error::timeout || ec == asio::error::operation_aborted) {
-                // Timed out waiting for data — check close flag and retry
-                if (should_close_.load(std::memory_order_acquire)) break;
-                continue;
-            }
-
-            if (ec == http::error::end_of_stream || ec == asio::error::eof) {
-                // Stream ended gracefully
-                LOG_INFO("HTTP Stream ended");
-                break;
-            }
-            else if (ec) {
-                LOG_ERROR("HTTP Stream read error: {}", ec.message());
-                on_error_(ec.message());
-                break;
-            }
-
-            // Commit the received data to the buffer
-            buffer.commit(bytes_transferred);
-
-            // Convert buffer to string
-            auto data_view = beast::buffers_to_string(buffer.data());
-
-            if (!data_view.empty()) {
-                if (is_sse) {
-                    parse_sse_chunk(data_view.data(), data_view.size());
-                } else {
-                    // Raw chunked data
-                    on_data_(data_view.data(), data_view.size());
-                }
-
-                // Clear the consumed data
-                buffer.consume(buffer.size());
-            }
-        }
-
-        // Graceful shutdown
-        stream.expires_after(std::chrono::seconds(5));
-        beast::error_code ec;
-        stream.socket().shutdown(tcp::socket::shutdown_both, ec);
-
-        if(ec && ec != beast::errc::not_connected) {
-            LOG_WARN("Socket shutdown warning: {}", ec.message());
         }
     }
     catch (const std::exception& e) {
-        LOG_ERROR("HttpStream exception: {}", e.what());
-        on_error_(e.what());
+        // After close() this is the cancelled request or header read, not a failure
+        if (!should_close_.load(std::memory_order_acquire)) {
+            LOG_ERROR("HttpStream exception: {}", e.what());
+            on_error_(e.what());
+        }
     }
 
     status_.store(Status::DISCONNECTED, std::memory_order_release);
     on_disconnected_();
+}
+
+// Sends the streaming GET request over a connected stream and delivers the response body until the
+// message ends, close() is requested or the read fails. Returns false if the server rejected the request.
+template <typename Stream>
+asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
+    auto& socket = beast::get_lowest_layer(stream);
+
+    // Let close() cancel the request and response I/O. Unregistered on return, before the graceful
+    // shutdown, so a close() issued from a callback cannot cancel the shutdown.
+    socket_registration registration{ *this, socket };
+
+    // Set up an HTTP GET request for streaming
+    http::request<http::string_body> req{ http::verb::get, target_, 11 };
+    req.set(http::field::host, detail::format_authority(host_));
+    req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
+    req.set(http::field::accept, "text/event-stream");
+    req.set(http::field::cache_control, "no-cache");
+
+    // Set custom headers
+    for (auto &header_pair : headers_) {
+        req.set(header_pair.first, header_pair.second);
+    }
+
+    // Disable timeout for streaming. A stream may stay silent for any length of time, and a Beast
+    // timeout closes the socket, so a read timeout would drop idle streams; close() cancels instead.
+    socket.expires_never();
+
+    // Send the HTTP request
+    co_await http::async_write(stream, req);
+
+    // Read response header first. The body is read through the same parser so the transfer coding
+    // (chunk sizes, chunk extensions, trailers) is decoded; buffer_body has it write the decoded bytes
+    // straight into body_buf instead of accumulating them in the message.
+    beast::flat_buffer buffer;
+    http::response_parser<http::buffer_body> parser;
+    parser.body_limit(std::numeric_limits<std::uint64_t>::max());
+
+    // Read just the header
+    co_await http::async_read_header(stream, buffer, parser);
+
+    auto& res = parser.get();
+
+    if (res.result() != http::status::ok) {
+        LOG_ERROR("HTTP Stream failed with status: {}", static_cast<int>(res.result()));
+        on_error_(std::format("HTTP error: {}", std::string(res.reason())));
+        co_return false;
+    }
+
+    // Connection established successfully
+    status_.store(Status::CONNECTED, std::memory_order_release);
+    on_connected_();
+
+    // Check if this is SSE format
+    const bool is_sse = res[http::field::content_type].find("text/event-stream") != std::string::npos;
+
+    // Body bytes async_read_header read past the header stay in buffer and are parsed by the first read
+    std::array<char, 8192> body_buf;
+
+    // Read body continuously
+    while (!parser.is_done() &&
+           !should_close_.load(std::memory_order_acquire) &&
+           run_.load(std::memory_order_acquire) &&
+           status_.load(std::memory_order_acquire) == Status::CONNECTED)
+    {
+        auto& body = res.body();
+        body.data = body_buf.data();
+        body.size = body_buf.size();
+
+        auto [ec, bytes_transferred] = co_await http::async_read_some(
+            stream, buffer, parser,
+            asio::as_tuple(asio::use_awaitable)
+        );
+
+        // Deliver what was decoded, even if the read then stopped with an error
+        if (const auto decoded = body_buf.size() - body.size; decoded > 0) {
+            if (is_sse) {
+                parse_sse_chunk(body_buf.data(), decoded);
+            } else {
+                on_data_(body_buf.data(), decoded);
+            }
+        }
+
+        if (!ec || ec == http::error::need_buffer) {
+            // need_buffer: body_buf is full, the rest is delivered by the next read
+            continue;
+        }
+
+        if (should_close_.load(std::memory_order_acquire)) {
+            // close() cancelled the read
+            break;
+        }
+
+        LOG_ERROR("HTTP Stream read error: {}", ec.message());
+        on_error_(ec.message());
+        break;
+    }
+
+    if (parser.is_done()) {
+        // The server finished the response (final chunk, Content-Length reached or EOF-delimited body closed)
+        LOG_INFO("HTTP Stream ended");
+    }
+    co_return true;
 }
 
 void HttpStream::parse_sse_chunk(const char* data, size_t size) {

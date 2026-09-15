@@ -638,6 +638,8 @@ while (true) {
 
 The `HttpStream` class provides support for HTTP streaming, including Server-Sent Events (SSE) and chunked responses.
 
+The response body is decoded by Beast's HTTP parser, so `onData` never sees transfer-coding framing (chunk sizes, chunk extensions, trailers). For a `text/event-stream` response it receives the `data` of each complete event; for any other content type it receives the decoded body bytes as they arrive, in pieces of at most 8 KiB that need not align with the server's chunks. A chunked or `Content-Length` body that ends early is reported through `onError`. A stream has no idle timeout: it stays open until the server ends the response or `close()` is called, and `close()` interrupts a pending read immediately.
+
 **Constructor:**
 ```cpp
 HttpStream(

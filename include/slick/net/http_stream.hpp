@@ -49,9 +49,13 @@ public:
     Status status() const noexcept;
 
 private:
+    struct socket_registration;  // Defined in http_stream.cpp
+
     boost::asio::awaitable<void> do_stream_session();
     boost::asio::awaitable<void> do_stream_session_ssl();
     boost::asio::awaitable<void> do_stream_session_plain();
+    template <typename Stream>
+    boost::asio::awaitable<bool> stream_response(Stream& stream);
     void parse_sse_chunk(const char* data, size_t size);
 
 private:
@@ -68,6 +72,7 @@ private:
     std::atomic<Status> status_{ Status::DISCONNECTED };
     std::atomic_bool should_close_{false};
     std::string sse_buffer_;  // For incomplete SSE events
+    socket_registration* registered_socket_ = nullptr;  // Socket close() cancels; service thread only
 };
 
 } // namespace slick::net
