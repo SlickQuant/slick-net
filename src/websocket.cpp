@@ -8,6 +8,7 @@ namespace {
     std::atomic_bool init_service_thread_{false};
     std::atomic_bool run_{false};
     std::atomic_bool busy_poll_{false};
+    std::atomic<std::uint64_t> service_loop_iterations_{0};
 }
 
 namespace slick::net::detail {
@@ -35,6 +36,10 @@ bool websocket_busy_poll() noexcept {
     return busy_poll_.load(std::memory_order_relaxed);
 }
 
+std::uint64_t websocket_service_loop_iterations() noexcept {
+    return service_loop_iterations_.load(std::memory_order_acquire);
+}
+
 void start_websocket_service() {
     auto init_service = init_service_thread_.load(std::memory_order_relaxed);
     if (init_service_thread_.compare_exchange_strong(init_service, true,
@@ -49,6 +54,9 @@ void start_websocket_service() {
                 // returns at once when no I/O is pending and the loop spins a core
                 auto work = asio::make_work_guard(ioc_);
                 while (run_.load(std::memory_order_acquire)) {
+                    // Single writer, so load + store needs no CAS
+                    service_loop_iterations_.store(
+                        service_loop_iterations_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
                     try {
                         if (busy_poll_.load(std::memory_order_relaxed)) {
                             if (ioc_.poll() == 0 && ioc_.stopped()) {

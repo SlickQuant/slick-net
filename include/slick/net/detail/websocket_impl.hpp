@@ -46,6 +46,8 @@ void start_websocket_service();
 void stop_websocket_service();
 void set_websocket_busy_poll(bool enable) noexcept;
 bool websocket_busy_poll() noexcept;
+// Turns of the service thread's loop: one per poll() while busy polling, one per stop() otherwise
+std::uint64_t websocket_service_loop_iterations() noexcept;
 
 struct websocket_url_parts {
     std::string host;

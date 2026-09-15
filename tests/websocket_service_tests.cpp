@@ -33,7 +33,9 @@ using namespace std::chrono_literals;
 
 constexpr auto kMeasureWindow = 500ms;
 constexpr double kIdleUsage = 0.1;  // fraction of one core
-constexpr double kSpinUsage = 0.5;
+// A loop blocked in run() only turns when stopped; a polling loop turns once per poll()
+constexpr std::uint64_t kIdleIterations = 2;
+constexpr std::uint64_t kSpinIterations = 1000;
 
 // CPU time consumed by the calling thread
 std::chrono::nanoseconds thread_cpu_time() {
@@ -53,28 +55,62 @@ std::chrono::nanoseconds thread_cpu_time() {
 #endif
 }
 
-// Reads the service thread's CPU clock on the service thread itself. Process CPU time read from
+struct service_sample {
+    std::chrono::nanoseconds cpu{};
+    std::uint64_t loop_iterations = 0;
+};
+
+// Samples the service thread on the service thread itself. Process CPU time read from
 // another thread is unreliable: macOS getrusage() only sums usage each thread has already
 // committed, so a service thread spinning on another core reads as mostly idle.
-std::chrono::nanoseconds service_thread_cpu_time() {
-    auto sample = std::make_shared<std::promise<std::chrono::nanoseconds>>();
+service_sample sample_service_thread() {
+    auto sample = std::make_shared<std::promise<service_sample>>();
     auto result = sample->get_future();
-    boost::asio::post(detail::websocket_ioc(), [sample] { sample->set_value(thread_cpu_time()); });
+    boost::asio::post(detail::websocket_ioc(), [sample] {
+        sample->set_value({thread_cpu_time(), detail::websocket_service_loop_iterations()});
+    });
     if (result.wait_for(5s) != std::future_status::ready) {
-        ADD_FAILURE() << "service thread did not run the CPU time sampling handler";
+        ADD_FAILURE() << "service thread did not run the sampling handler";
         return {};
     }
     return result.get();
 }
 
-// Cores used by the service thread over the window
-double service_cpu_usage_over(std::chrono::milliseconds window) {
-    const auto cpu_start = service_thread_cpu_time();
+struct service_activity {
+    double cpu_usage = 0;  // cores used by the service thread
+    std::uint64_t loop_iterations = 0;
+};
+
+// Busy polling is detected by loop turns rather than CPU usage: the CPU share an OS accounts to a
+// spinning thread varies (the macOS CI runner reports ~0.2 of a core), while a loop blocked in
+// run() does not turn at all.
+service_activity service_activity_over(std::chrono::milliseconds window) {
+    const auto start = sample_service_thread();
     const auto wall_start = std::chrono::steady_clock::now();
     std::this_thread::sleep_for(window);
-    const auto cpu = service_thread_cpu_time() - cpu_start;
+    const auto end = sample_service_thread();
     const auto wall = std::chrono::steady_clock::now() - wall_start;
-    return std::chrono::duration<double>(cpu) / std::chrono::duration<double>(wall);
+    return {std::chrono::duration<double>(end.cpu - start.cpu) / std::chrono::duration<double>(wall),
+            end.loop_iterations - start.loop_iterations};
+}
+
+::testing::AssertionResult service_idle() {
+    const auto activity = service_activity_over(kMeasureWindow);
+    if (activity.cpu_usage < kIdleUsage && activity.loop_iterations <= kIdleIterations) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure() << "service thread is not idle: cpu usage " << activity.cpu_usage
+        << " (limit " << kIdleUsage << "), loop iterations " << activity.loop_iterations
+        << " (limit " << kIdleIterations << ")";
+}
+
+::testing::AssertionResult service_busy_polling() {
+    const auto activity = service_activity_over(kMeasureWindow);
+    if (activity.loop_iterations > kSpinIterations) {
+        return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure() << "service thread is not busy polling: loop iterations "
+        << activity.loop_iterations << " (need > " << kSpinIterations << "), cpu usage " << activity.cpu_usage;
 }
 
 } // namespace
@@ -114,7 +150,7 @@ TEST_F(WebsocketServiceTest, IdleServiceThreadDoesNotSpin) {
     ASSERT_TRUE(run_failed_connection());
     ASSERT_TRUE(Websocket<>::is_running());
 
-    EXPECT_LT(service_cpu_usage_over(kMeasureWindow), kIdleUsage);
+    EXPECT_TRUE(service_idle());
 }
 
 TEST_F(WebsocketServiceTest, BusyPollSpinsAndDeliversEvents) {
@@ -124,21 +160,21 @@ TEST_F(WebsocketServiceTest, BusyPollSpinsAndDeliversEvents) {
     // The connect completion is dispatched by the polling loop
     ASSERT_TRUE(run_failed_connection());
 
-    EXPECT_GT(service_cpu_usage_over(kMeasureWindow), kSpinUsage);
+    EXPECT_TRUE(service_busy_polling());
 }
 
 // Enabling busy polling must wake a service thread blocked in run(), and switching
 // back must leave the service processing I/O
 TEST_F(WebsocketServiceTest, BusyPollSwitchesWhileRunning) {
     ASSERT_TRUE(run_failed_connection());
-    EXPECT_LT(service_cpu_usage_over(kMeasureWindow), kIdleUsage);
+    EXPECT_TRUE(service_idle());
 
     Websocket<>::set_busy_poll(true);
-    EXPECT_GT(service_cpu_usage_over(kMeasureWindow), kSpinUsage);
+    EXPECT_TRUE(service_busy_polling());
     ASSERT_TRUE(run_failed_connection());
 
     Websocket<>::set_busy_poll(false);
-    EXPECT_LT(service_cpu_usage_over(kMeasureWindow), kIdleUsage);
+    EXPECT_TRUE(service_idle());
     ASSERT_TRUE(run_failed_connection());
 }
 
@@ -152,7 +188,7 @@ TEST_F(WebsocketServiceTest, ShutdownWhileBusyPollingThenRestart) {
     // The next open() restarts the service in busy-poll mode
     ASSERT_TRUE(run_failed_connection());
     EXPECT_TRUE(Websocket<>::is_running());
-    EXPECT_GT(service_cpu_usage_over(kMeasureWindow), kSpinUsage);
+    EXPECT_TRUE(service_busy_polling());
 }
 
 } // namespace slick::net
