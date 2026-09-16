@@ -887,6 +887,65 @@ TEST_F(HttpTest, AsyncMixedOperations) {
     EXPECT_EQ(completed.load(), 5);
 }
 
+// ======================== Async Service Lifetime Tests ========================
+
+// What a callback-based async_*() request delivered. Shared with the callback so a request abandoned by
+// shutdown(), and resumed when a later request restarts the service, never writes into dead state.
+struct async_capture {
+    std::atomic<bool> done{false};
+    Http::Response response;  // only safe to read once done is set
+};
+
+// Issues a callback-based async GET whose response lands in a capture that outlives this call
+std::shared_ptr<async_capture> async_get_captured(const std::string& url) {
+    auto capture = std::make_shared<async_capture>();
+    Http::async_get([capture](Http::Response&& response) {
+        capture->response = std::move(response);
+        capture->done.store(true, std::memory_order_release);
+    }, url);
+    return capture;
+}
+
+// Regression: the async service ran on a detached thread that nothing owned and that no caller could stop,
+// so a request still in flight at process exit went on using the service io_context and the other statics
+// of http.cpp while static destruction was destroying them. shutdown() now stops the service and joins its
+// thread, and runs automatically at program exit.
+TEST_F(HttpTest, AsyncService_Shutdown_StopsServiceAndLaterRequestRestartsIt) {
+    local_echo_server server;
+
+    auto first = async_get_captured(std::format("http://127.0.0.1:{}/first", server.port()));
+    ASSERT_TRUE(wait_for_condition([&] { return first->done.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    EXPECT_EQ(first->response.result_text, "GET /first");
+    EXPECT_TRUE(Http::is_running()) << "an async request did not start the service";
+
+    Http::shutdown();
+    EXPECT_FALSE(Http::is_running()) << "shutdown() left the service running";
+
+    // The next request starts the service again instead of queueing on a stopped io_context
+    auto second = async_get_captured(std::format("http://127.0.0.1:{}/second", server.port()));
+    ASSERT_TRUE(wait_for_condition([&] { return second->done.load(std::memory_order_acquire); }, std::chrono::seconds(10)))
+        << "request made after shutdown() never ran";
+    EXPECT_EQ(second->response.result_text, "GET /second");
+    EXPECT_TRUE(Http::is_running());
+}
+
+// shutdown() joins the service thread, so it must not wait for the requests that thread is running: it
+// abandons them and returns instead of blocking on a slow server, which would stall program exit.
+TEST_F(HttpTest, AsyncService_ShutdownWithRequestInFlight_ReturnsWithoutWaitingForIt) {
+    local_echo_server server;
+    auto capture = async_get_captured(std::format("http://127.0.0.1:{}/slow", server.port()));
+    ASSERT_TRUE(wait_for_condition([&] { return server.slow_requests() > 0; }, std::chrono::seconds(5)))
+        << "the request never reached the server";
+
+    const auto begin = std::chrono::steady_clock::now();
+    Http::shutdown();
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+
+    EXPECT_FALSE(Http::is_running());
+    EXPECT_LT(elapsed_ms, local_echo_server::slow_response_delay.count() / 2)
+        << "shutdown() waited for the in-flight request";
+}
+
 // ======================== Error Handling Tests ========================
 
 TEST_F(HttpTest, InvalidHostname) {

@@ -181,7 +181,7 @@ interception — use it only for local testing.
 
 `slick-net` does not install `SIGINT`/`SIGTERM` handlers — signal dispositions belong to
 the application. Without a handler the default action terminates the process; the
-`Websocket` and `HttpStream` services are shut down automatically at normal program exit.
+`Websocket`, `Http` and `HttpStream` services are shut down automatically at normal program exit.
 
 For a graceful Ctrl-C, record the signal in your handler and call `shutdown()` from normal
 code. `shutdown()` stops the `io_context` and joins the service thread, so it must never be
@@ -350,6 +350,16 @@ void async_put(std::function<void(Response&&)> on_response, std::string_view url
 void async_patch(std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
 void async_del(std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
 ```
+
+Callback-based methods return as soon as the request is queued and run it on a shared service thread that the first such call starts. The callback runs on that thread, so a callback that blocks holds up the other callback-based requests.
+
+**Async Service Control:**
+```cpp
+static bool is_running() noexcept;  // whether the shared async service is running
+static void shutdown();             // stop it and join its thread
+```
+
+`shutdown()` stops the shared service and joins its thread, abandoning requests still in flight without calling their callbacks, so a hung request cannot stall program exit; the next callback-based `async_*()` call starts the service again. It runs automatically at normal program exit, so an in-flight request can never use the service while the statics it runs on are being destroyed. Because it joins the service thread, never call it from a response callback or from a signal handler. The awaitable methods below run on the caller's executor and are unaffected by it.
 
 **Asynchronous Awaitable Methods (C++20 Coroutines):**
 ```cpp

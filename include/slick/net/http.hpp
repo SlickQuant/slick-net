@@ -43,6 +43,17 @@ public:
     static void async_patch(std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
     static void async_del(std::function<void(Response&&)> on_response, std::string_view url, std::string_view data = "", std::vector<std::pair<std::string, std::string>>&& headers = {});
 
+    // Whether the shared service that runs the callback-based async_*() requests above is running. It is
+    // started by the first such request and stopped by shutdown().
+    static bool is_running() noexcept;
+
+    // Stops that shared service and joins its thread, abandoning requests still in flight without calling
+    // their callbacks; the next callback-based async_*() request starts it again. It runs automatically at
+    // normal program exit, so an in-flight request can never use the service while the statics it runs on
+    // are being destroyed. It joins the service thread, so never call it from a response callback or from a
+    // signal handler. The awaitable overloads below run on the caller's executor and are unaffected.
+    static void shutdown();
+
     static boost::asio::awaitable<Response> async_get(std::string_view url, std::vector<std::pair<std::string, std::string>>&& headers = {});
     static boost::asio::awaitable<Response> async_post(std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
     static boost::asio::awaitable<Response> async_put(std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});

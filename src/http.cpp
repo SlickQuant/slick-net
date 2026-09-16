@@ -19,6 +19,7 @@
 #include <boost/asio/connect.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
@@ -30,14 +31,21 @@ namespace slick::net {
 namespace {
         
     using Response = Http::Response;
+
+    // Shared service that runs the callback-based async_*() requests. The statics of a translation unit are
+    // destroyed in reverse order of construction, so declaring it before the terminator below has the thread
+    // joined while this context, and everything the running requests use, is still alive.
     asio::io_context async_ioc_;
 
-    struct service_info
-    {
-        uint32_t async_requests_ = 0;
-        bool service_running_ = false;
+    enum class service_state : std::uint8_t {
+        stopped,
+        starting,   // start_service() is creating the thread
+        running,
+        stopping,   // shutdown() is joining the thread
     };
-    std::atomic<service_info> async_service_;
+    std::atomic<service_state> service_state_{ service_state::stopped };
+    // Touched only by the thread that moved service_state_ to starting or stopping, so it needs no lock
+    std::thread service_thread_;
 
     // Builds the request message; body is moved into it, so a large payload is never copied
     http::request<http::string_body> make_request(
@@ -244,56 +252,71 @@ namespace {
         on_response(std::move(response));
     }
 
-    void async_request_done() {
-        auto svc_info = async_service_.load(std::memory_order_relaxed);
-        service_info update;
-        do {
-            assert(svc_info.async_requests_ > 0);
-            update = svc_info;
-            --update.async_requests_;
-        } while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
+    void run_service_thread() {
+        // Outstanding work keeps run() blocked while idle, so it returns only once shutdown() stops the
+        // context. The thread never ends on its own, so it stays owned and joinable, and a request can
+        // never race its restart() against a thread that is still winding down.
+        auto work = asio::make_work_guard(async_ioc_);
+        for (;;) {
+            try {
+                async_ioc_.run();
+                return;
+            }
+            catch (const std::exception& ex) {
+                // A throwing response callback does not stop the io_context; keep serving the other requests
+                LOG_ERROR("Http service thread error: {}", ex.what());
+            }
+        }
     }
 
-    void ensure_service_thread() {
-        auto svc_info = async_service_.load(std::memory_order_relaxed);
-        service_info update;
-        do {
-            update = svc_info;
-            ++update.async_requests_;
-            update.service_running_ = true;
-        } while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
+    // Starts the service thread unless the service is already starting or running. A request made while
+    // shutdown() is stopping the service stays queued until a later request starts it again.
+    void start_service() {
+        auto expected = service_state::stopped;
+        if (!service_state_.compare_exchange_strong(expected, service_state::starting,
+                                                    std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return;
+        }
 
-        if (!svc_info.service_running_)
-        {
-            std::thread([](){
-                bool run = true;
-                while (run) {
+        // Clear the stop() left by a previous shutdown()
+        async_ioc_.restart();
+        service_thread_ = std::thread(run_service_thread);
+        service_state_.store(service_state::running, std::memory_order_release);
+    }
+
+    // A Terminator class to ensure Http::shutdown() is called at program exit
+    struct HttpTerminater
+    {
+        ~HttpTerminater() {
+            Http::shutdown();
+        }
+    };
+
+    static HttpTerminater s_http_terminater;
+
+    // Runs a callback-based request on the shared service, reporting the response, or the exception that
+    // replaced it, through on_response
+    void spawn_async_request(
+        std::string url,
+        http::verb method,
+        std::function<void(Response&&)> on_response,
+        std::vector<std::pair<std::string, std::string>>&& headers,
+        std::string body = {})
+    {
+        start_service();
+        auto session = do_session(std::move(url), method, on_response, std::move(headers), std::move(body));
+        asio::co_spawn(
+            async_ioc_,
+            std::move(session),
+            [on_response = std::move(on_response)](std::exception_ptr e) {
+                if (e) {
                     try {
-                        if (async_ioc_.stopped()) {
-                            auto svc_info = async_service_.load(std::memory_order_relaxed);
-                            service_info update;
-                            do {
-                                if (svc_info.async_requests_) {
-                                    break;
-                                }
-
-                                update = svc_info;
-                                update.service_running_ = false; 
-                            }
-                            while (!async_service_.compare_exchange_weak(svc_info, update, std::memory_order_acq_rel, std::memory_order_relaxed));
-                            run = svc_info.async_requests_;
-                            async_ioc_.restart();
-                            continue;
-                        }
-                        async_ioc_.run();
-                    }
-                    catch(const std::exception& e) {
-                        async_ioc_.restart();
-                        LOG_ERROR("Http service thread error: {}", e.what());
+                        std::rethrow_exception(e);
+                    } catch (const std::exception& e) {
+                        on_response(Response{500, e.what()});
                     }
                 }
-            }).detach();
-        }
+            });
     }
 
     Response run_sync_request(
@@ -404,25 +427,37 @@ Http::Response Http::del(std::string_view url, std::string_view data, std::vecto
     return sync_request(url, http::verb::delete_, std::move(headers), data);
 }
 
+bool Http::is_running() noexcept {
+    return service_state_.load(std::memory_order_relaxed) == service_state::running;
+}
+
+void Http::shutdown() {
+    auto state = service_state_.load(std::memory_order_acquire);
+    for (;;) {
+        if (state == service_state::starting) {
+            // start_service() only creates the thread, so it finishes shortly
+            std::this_thread::yield();
+            state = service_state_.load(std::memory_order_acquire);
+        }
+        else if (state != service_state::running) {
+            // Already stopped, or another shutdown() is stopping it
+            return;
+        }
+        else if (service_state_.compare_exchange_weak(state, service_state::stopping,
+                                                      std::memory_order_acq_rel, std::memory_order_acquire)) {
+            break;
+        }
+    }
+
+    // Requests still in flight are abandoned rather than waited for, so a hung one cannot hold up program
+    // exit; their handlers are destroyed with async_ioc_, after this join has ended the only thread using it.
+    async_ioc_.stop();
+    service_thread_.join();
+    service_state_.store(service_state::stopped, std::memory_order_release);
+}
+
 void Http::async_get(std::function<void(Response&&)> on_response, std::string_view url, std::vector<std::pair<std::string, std::string>>&& headers) {
-    ensure_service_thread();
-    asio::co_spawn(
-        async_ioc_,
-        do_session(std::string(url), http::verb::get,
-            [on_response](Response&& response) mutable {
-                on_response(std::move(response));
-            },
-            std::move(headers)),
-        [on_response](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    on_response(Response{500, e.what()});
-                }
-            }
-            async_request_done();
-    });
+    spawn_async_request(std::string(url), http::verb::get, std::move(on_response), std::move(headers));
 }
 
 void Http::async_post(
@@ -430,24 +465,7 @@ void Http::async_post(
     std::string_view url,
     std::string_view data,
     std::vector<std::pair<std::string, std::string>>&& headers) {
-    ensure_service_thread();
-    asio::co_spawn(
-        async_ioc_,
-        do_session(std::string(url), http::verb::post,
-            [on_response](Response&& response) mutable {
-                on_response(std::move(response));
-            },
-            std::move(headers), std::string(data)),
-        [on_response](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    on_response(Response{500, e.what()});
-                }
-            }
-            async_request_done();
-    });
+    spawn_async_request(std::string(url), http::verb::post, std::move(on_response), std::move(headers), std::string(data));
 }
 
 void Http::async_put(
@@ -455,24 +473,7 @@ void Http::async_put(
     std::string_view url,
     std::string_view data,
     std::vector<std::pair<std::string, std::string>>&& headers) {
-    ensure_service_thread();
-    asio::co_spawn(
-        async_ioc_,
-        do_session(std::string(url), http::verb::put,
-            [on_response](Response&& response) mutable {
-                on_response(std::move(response));
-            },
-            std::move(headers), std::string(data)),
-        [on_response](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    on_response(Response{500, e.what()});
-                }
-            }
-            async_request_done();
-    });
+    spawn_async_request(std::string(url), http::verb::put, std::move(on_response), std::move(headers), std::string(data));
 }
 
 void Http::async_patch(
@@ -480,24 +481,7 @@ void Http::async_patch(
     std::string_view url,
     std::string_view data,
     std::vector<std::pair<std::string, std::string>>&& headers) {
-    ensure_service_thread();
-    asio::co_spawn(
-        async_ioc_,
-        do_session(std::string(url), http::verb::patch,
-            [on_response](Response&& response) mutable {
-                on_response(std::move(response));
-            },
-            std::move(headers), std::string(data)),
-        [on_response](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    on_response(Response{500, e.what()});
-                }
-            }
-            async_request_done();
-    });
+    spawn_async_request(std::string(url), http::verb::patch, std::move(on_response), std::move(headers), std::string(data));
 }
 
 void Http::async_del(
@@ -505,24 +489,7 @@ void Http::async_del(
     std::string_view url,
     std::string_view data,
     std::vector<std::pair<std::string, std::string>>&& headers) {
-    ensure_service_thread();
-    asio::co_spawn(
-        async_ioc_,
-        do_session(std::string(url), http::verb::delete_,
-            [on_response](Response&& response) mutable {
-                on_response(std::move(response));
-            },
-            std::move(headers), std::string(data)),
-        [on_response](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& e) {
-                    on_response(Response{500, e.what()});
-                }
-            }
-            async_request_done();
-    });
+    spawn_async_request(std::string(url), http::verb::delete_, std::move(on_response), std::move(headers), std::string(data));
 }
 
 boost::asio::awaitable<Http::Response> Http::async_get(std::string_view url, std::vector<std::pair<std::string, std::string>>&& headers) {
