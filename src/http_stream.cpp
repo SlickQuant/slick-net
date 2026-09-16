@@ -19,7 +19,10 @@
 
 #include <algorithm>
 #include <array>
+#include <stdexcept>
+#include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace beast = boost::beast;
@@ -91,27 +94,66 @@ namespace {
     };
 
     static HttpStreamTerminater s_http_stream_terminater;
-}   // end namespace
 
-// Exposes a session's socket to close() while the session sends its request and reads the response.
-// Created, destroyed and read only on the stream's strand, so it needs no synchronization.
-struct HttpStream::socket_registration {
-    socket_registration(HttpStream& owner, beast::tcp_stream& socket) noexcept
-        : owner(owner)
-        , socket(socket) {
-        owner.registered_socket_ = this;
+    // HttpStream::state_ layout: the generation above the Status in the lowest two bits
+    constexpr std::uint64_t make_state(std::uint64_t generation, HttpStream::Status status) noexcept {
+        return (generation << 2) | static_cast<std::uint64_t>(status);
     }
 
-    ~socket_registration() {
-        if (owner.registered_socket_ == this) {
-            owner.registered_socket_ = nullptr;
+    constexpr std::uint64_t generation_of(std::uint64_t state) noexcept {
+        return state >> 2;
+    }
+
+    constexpr HttpStream::Status status_of(std::uint64_t state) noexcept {
+        return static_cast<HttpStream::Status>(state & 3);
+    }
+
+    // The first open() starts generation 1, so 0 never names an open generation
+    constexpr std::uint64_t any_generation = 0;
+
+    // Runs a callback where nothing is left to report its exception to, logging the exception instead so it
+    // cannot skip the bookkeeping that ends a session
+    template <typename Callback, typename... Args>
+    void invoke_logged(std::string_view name, Callback& callback, Args&&... args) {
+        try {
+            callback(std::forward<Args>(args)...);
+        }
+        catch (const std::exception& ex) {
+            LOG_ERROR("HttpStream {} callback error: {}", name, ex.what());
+        }
+        catch (...) {
+            LOG_ERROR("HttpStream {} callback error: unknown exception", name);
         }
     }
+}   // end namespace
 
-    socket_registration(const socket_registration&) = delete;
-    socket_registration& operator=(const socket_registration&) = delete;
+// The I/O close() cancels: the resolver looking up the host and the socket that connects, handshakes, sends the
+// request and reads the response. Created, destroyed and used only on the stream's strand, which runs one session
+// at a time, so it needs no synchronization.
+struct HttpStream::session_io {
+    session_io(HttpStream& owner, std::uint64_t generation, tcp::resolver& resolver, beast::tcp_stream& socket) noexcept
+        : owner(owner)
+        , generation(generation)
+        , resolver(resolver)
+        , socket(socket) {
+        owner.session_io_ = this;
+    }
+
+    ~session_io() {
+        owner.session_io_ = nullptr;
+    }
+
+    session_io(const session_io&) = delete;
+    session_io& operator=(const session_io&) = delete;
+
+    void cancel() {
+        resolver.cancel();
+        socket.cancel();
+    }
 
     HttpStream& owner;
+    const std::uint64_t generation;
+    tcp::resolver& resolver;
     beast::tcp_stream& socket;
 };
 
@@ -165,46 +207,49 @@ std::size_t HttpStream::service_threads() noexcept {
 }
 
 HttpStream::Status HttpStream::status() const noexcept {
-    return status_.load(std::memory_order_relaxed);
+    return status_of(state_.load(std::memory_order_relaxed));
 }
 
 void HttpStream::open()
 {
+    // Taken first, so a stream no shared_ptr owns throws before it is marked open
+    auto self = shared_from_this();
+
+    auto state = state_.load(std::memory_order_acquire);
+    do {
+        if (status_of(state) != Status::DISCONNECTED) {
+            LOG_DEBUG("HTTP Stream {} is already open", url_);
+            return;
+        }
+    } while (!state_.compare_exchange_weak(state, make_state(generation_of(state) + 1, Status::CONNECTING),
+                                           std::memory_order_acq_rel, std::memory_order_acquire));
+
     LOG_INFO("Opening HTTP Stream {}", url_);
-    status_.store(Status::CONNECTING, std::memory_order_release);
-    should_close_.store(false, std::memory_order_release);
 
     // A stream on its own executor leaves the shared service alone
     if (use_service_) {
         start_service();
     }
 
-    // Start the session on this stream's strand - keep object alive with shared_from_this
-    asio::co_spawn(
-        executor_,
-        do_stream_session(),
-        [self = shared_from_this()](std::exception_ptr e) {
-            if (e) {
-                try {
-                    std::rethrow_exception(e);
-                } catch (const std::exception& ex) {
-                    self->on_error_(std::format("HttpStream session error: {}", ex.what()));
-                }
-            }
-        });
+    // Start the session on this stream's strand - the handler keeps the stream alive
+    asio::post(executor_, [self = std::move(self)]() { self->serve(); });
 }
 
 void HttpStream::close()
 {
-    LOG_INFO("Closing HTTP Stream {}", url_);
-    should_close_.store(true, std::memory_order_release);
+    if (!end_generation(any_generation)) {
+        return;
+    }
 
-    // A session waiting on a silent server would not see the flag until data arrives, so cancel its pending
-    // I/O on the stream's strand, the only place that touches the registered socket. The flag is set first,
-    // so a session that has not started its next read yet sees it and never waits.
+    LOG_INFO("Closing HTTP Stream {}", url_);
+
+    // The session checks the generation after every step, but a step waiting on a connect, a handshake or a
+    // silent server may not finish for a long time, so cancel its I/O on the stream's strand, the only place that
+    // touches it. A session that has not registered its I/O yet sees the ended generation once it does. A session
+    // of a later open() may have registered by the time this runs; it is current, so it is left alone.
     asio::post(executor_, [weak_self = weak_from_this()]() {
-        if (auto self = weak_self.lock(); self && self->registered_socket_) {
-            self->registered_socket_->socket.cancel();
+        if (auto self = weak_self.lock(); self && self->session_io_ && !self->is_current(self->session_io_->generation)) {
+            self->session_io_->cancel();
         }
     });
 }
@@ -235,114 +280,165 @@ void HttpStream::shutdown() {
     service_state_.store(service_state::stopped, std::memory_order_release);
 }
 
-asio::awaitable<void> HttpStream::do_stream_session() {
-    if (use_ssl_) {
-        return do_stream_session_ssl();
-    } else {
-        return do_stream_session_plain();
+// Whether generation is still open: neither close() nor the end of its session has ended it
+bool HttpStream::is_current(std::uint64_t generation) const noexcept {
+    const auto state = state_.load(std::memory_order_acquire);
+    return generation_of(state) == generation && status_of(state) != Status::DISCONNECTED;
+}
+
+// Ends a session whose generation was ended while its last step still succeeded: a DNS lookup cannot be
+// interrupted, and I/O can complete just before close() cancels it
+void HttpStream::throw_if_closed(std::uint64_t generation) const {
+    if (!is_current(generation)) {
+        throw boost::system::system_error(asio::error::operation_aborted);
     }
 }
 
-asio::awaitable<void> HttpStream::do_stream_session_ssl() {
-    auto executor = co_await asio::this_coro::executor;
-    auto resolver = asio::ip::tcp::resolver{ executor };
-    auto stream = ssl::stream<beast::tcp_stream>{ executor, tls_context() };
+// Moves the stream to DISCONNECTED if generation - or with any_generation, whichever one - is open. Returns
+// whether this call ended it.
+bool HttpStream::end_generation(std::uint64_t generation) noexcept {
+    auto state = state_.load(std::memory_order_acquire);
+    do {
+        if (status_of(state) == Status::DISCONNECTED ||
+            (generation != any_generation && generation_of(state) != generation)) {
+            return false;
+        }
+    } while (!state_.compare_exchange_weak(state, make_state(generation_of(state), Status::DISCONNECTED),
+                                           std::memory_order_acq_rel, std::memory_order_acquire));
+    return true;
+}
 
-    try {
-        // Set SNI and the host name/IP the server certificate must match
-        if (auto ec = detail::set_tls_peer_host(stream.native_handle(), host_)) {
-            on_error_("Error setting TLS peer host: " + ec.message());
-            status_.store(Status::DISCONNECTED, std::memory_order_release);
-            on_disconnected_();
+// Runs on the strand for every open() that started a session. Starts serve_sessions() unless it is running
+// already, in which case it takes up the new generation once its current session ends.
+void HttpStream::serve() {
+    if (serving_ || generation_of(state_.load(std::memory_order_acquire)) == served_generation_) {
+        return;
+    }
+    serving_ = true;
+    asio::co_spawn(executor_, serve_sessions(), [self = shared_from_this()](std::exception_ptr e) {
+        if (e) {
+            // Sessions catch the std::exception their I/O or a callback throws, so little else gets here
+            try {
+                std::rethrow_exception(e);
+            } catch (const std::exception& ex) {
+                LOG_ERROR("HttpStream session error: {}", ex.what());
+            } catch (...) {
+                LOG_ERROR("HttpStream session error: unknown exception");
+            }
+            // Let the next open() serve the stream again
+            self->serving_ = false;
+        }
+    });
+}
+
+// Runs the sessions of this stream one after another, so no two ever run at once, until every open() is served
+asio::awaitable<void> HttpStream::serve_sessions() {
+    for (;;) {
+        const auto generation = generation_of(state_.load(std::memory_order_acquire));
+        if (generation == served_generation_) {
+            // Cleared in the handler that found nothing left to serve, so the serve() of any later open() starts
+            // the loop again
+            serving_ = false;
             co_return;
         }
 
-        // Look up the domain name
-        auto const results = co_await resolver.async_resolve(host_, port_);
+        // Each open() before the newest one was closed before its session could start, so it never gets one, but it is
+        // still owed its onDisconnected
+        while (++served_generation_ != generation) {
+            invoke_logged("onDisconnected", on_disconnected_);
+        }
 
-        // Set the timeout
-        beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(30));
+        co_await run_session(generation);
+    }
+}
 
-        // Make the connection
-        co_await beast::get_lowest_layer(stream).async_connect(results);
+asio::awaitable<void> HttpStream::run_session(std::uint64_t generation) {
+    try {
+        if (use_ssl_) {
+            co_await do_stream_session_ssl(generation);
+        } else {
+            co_await do_stream_session_plain(generation);
+        }
+    }
+    catch (const std::exception& e) {
+        // After close() this is the cancelled I/O, not a failure
+        if (is_current(generation)) {
+            LOG_ERROR("HttpStream exception: {}", e.what());
+            invoke_logged("onError", on_error_, e.what());
+        }
+    }
 
-        // Set the timeout
-        beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(30));
+    // A session that ended on its own ends its generation; after close() it is ended already
+    end_generation(generation);
+    invoke_logged("onDisconnected", on_disconnected_);
+}
 
+asio::awaitable<void> HttpStream::do_stream_session_ssl(std::uint64_t generation) {
+    auto stream = ssl::stream<beast::tcp_stream>{ executor_, tls_context() };
+
+    // Set SNI and the host name/IP the server certificate must match
+    if (auto ec = detail::set_tls_peer_host(stream.native_handle(), host_)) {
+        throw std::runtime_error("Error setting TLS peer host: " + ec.message());
+    }
+
+    if (co_await stream_response(generation, stream)) {
+        // Graceful shutdown
+        beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(5));
+        auto [ec] = co_await stream.async_shutdown(asio::as_tuple);
+
+        if(ec && ec != asio::ssl::error::stream_truncated) {
+            LOG_WARN("SSL shutdown warning: {}", ec.message());
+        }
+    }
+}
+
+asio::awaitable<void> HttpStream::do_stream_session_plain(std::uint64_t generation) {
+    auto stream = beast::tcp_stream{ executor_ };
+
+    if (co_await stream_response(generation, stream)) {
+        // Graceful shutdown
+        stream.expires_after(std::chrono::seconds(5));
+        beast::error_code ec;
+        stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+
+        if(ec && ec != beast::errc::not_connected) {
+            LOG_WARN("Socket shutdown warning: {}", ec.message());
+        }
+    }
+}
+
+// Connects stream to the server (with the TLS handshake for an ssl::stream), sends the streaming GET request and
+// delivers the response body until the message ends, the generation is ended or the read fails. Returns false if
+// the server rejected the request.
+template <typename Stream>
+asio::awaitable<bool> HttpStream::stream_response(std::uint64_t generation, Stream& stream) {
+    auto& socket = beast::get_lowest_layer(stream);
+    auto resolver = tcp::resolver{ executor_ };
+
+    // Let close() cancel every step from the DNS lookup to the response I/O. Unregistered on return, before the
+    // graceful shutdown, so a close() issued from a callback cannot cancel the shutdown.
+    session_io io{ *this, generation, resolver, socket };
+
+    // close() may have run before there was any I/O to cancel
+    throw_if_closed(generation);
+
+    // Look up the domain name
+    auto const results = co_await resolver.async_resolve(host_, port_);
+    throw_if_closed(generation);
+
+    // Make the connection
+    socket.expires_after(std::chrono::seconds(30));
+    co_await socket.async_connect(results);
+    throw_if_closed(generation);
+
+    if constexpr (std::is_same_v<Stream, ssl::stream<beast::tcp_stream>>) {
         // Perform the SSL handshake (verifies the certificate chain and peer host)
+        socket.expires_after(std::chrono::seconds(30));
         if (auto [ec] = co_await stream.async_handshake(ssl::stream_base::client, asio::as_tuple); ec) {
             detail::throw_tls_handshake_error(stream.native_handle(), ec);
         }
-
-        if (co_await stream_response(stream)) {
-            // Graceful shutdown
-            beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(5));
-            auto [ec] = co_await stream.async_shutdown(asio::as_tuple);
-
-            if(ec && ec != asio::ssl::error::stream_truncated) {
-                LOG_WARN("SSL shutdown warning: {}", ec.message());
-            }
-        }
+        throw_if_closed(generation);
     }
-    catch (const std::exception& e) {
-        // After close() this is the cancelled request or header read, not a failure
-        if (!should_close_.load(std::memory_order_acquire)) {
-            LOG_ERROR("HttpStream exception: {}", e.what());
-            on_error_(e.what());
-        }
-    }
-
-    status_.store(Status::DISCONNECTED, std::memory_order_release);
-    on_disconnected_();
-}
-
-asio::awaitable<void> HttpStream::do_stream_session_plain() {
-    auto executor = co_await asio::this_coro::executor;
-    auto resolver = asio::ip::tcp::resolver{ executor };
-    auto stream = beast::tcp_stream{ executor };
-
-    try {
-        // Look up the domain name
-        auto const results = co_await resolver.async_resolve(host_, port_);
-
-        // Set the timeout
-        stream.expires_after(std::chrono::seconds(30));
-
-        // Make the connection
-        co_await stream.async_connect(results);
-
-        if (co_await stream_response(stream)) {
-            // Graceful shutdown
-            stream.expires_after(std::chrono::seconds(5));
-            beast::error_code ec;
-            stream.socket().shutdown(tcp::socket::shutdown_both, ec);
-
-            if(ec && ec != beast::errc::not_connected) {
-                LOG_WARN("Socket shutdown warning: {}", ec.message());
-            }
-        }
-    }
-    catch (const std::exception& e) {
-        // After close() this is the cancelled request or header read, not a failure
-        if (!should_close_.load(std::memory_order_acquire)) {
-            LOG_ERROR("HttpStream exception: {}", e.what());
-            on_error_(e.what());
-        }
-    }
-
-    status_.store(Status::DISCONNECTED, std::memory_order_release);
-    on_disconnected_();
-}
-
-// Sends the streaming GET request over a connected stream and delivers the response body until the
-// message ends, close() is requested or the read fails. Returns false if the server rejected the request.
-template <typename Stream>
-asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
-    auto& socket = beast::get_lowest_layer(stream);
-
-    // Let close() cancel the request and response I/O. Unregistered on return, before the graceful
-    // shutdown, so a close() issued from a callback cannot cancel the shutdown.
-    socket_registration registration{ *this, socket };
 
     // Set up an HTTP GET request for streaming
     http::request<http::string_body> req{ http::verb::get, target_, 11 };
@@ -362,6 +458,7 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
 
     // Send the HTTP request
     co_await http::async_write(stream, req);
+    throw_if_closed(generation);
 
     // Read response header first. The body is read through the same parser so the transfer coding
     // (chunk sizes, chunk extensions, trailers) is decoded; buffer_body has it write the decoded bytes
@@ -372,6 +469,7 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
 
     // Read just the header
     co_await http::async_read_header(stream, buffer, parser);
+    throw_if_closed(generation);
 
     auto& res = parser.get();
 
@@ -381,8 +479,12 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
         co_return false;
     }
 
-    // Connection established successfully
-    status_.store(Status::CONNECTED, std::memory_order_release);
+    // Connection established successfully, unless close() ended the generation since the check above
+    if (auto connecting = make_state(generation, Status::CONNECTING);
+        !state_.compare_exchange_strong(connecting, make_state(generation, Status::CONNECTED),
+                                        std::memory_order_acq_rel, std::memory_order_acquire)) {
+        co_return true;
+    }
     on_connected_();
 
     // Check if this is SSE format
@@ -391,13 +493,18 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
     // Drop any partial event an earlier response of this stream ended in, so it is not joined to this body
     sse_parser_.reset();
 
+    // One read may complete several events; stop delivering them as soon as a callback calls close()
+    const auto deliver_event = [this, generation](const char* data, std::size_t size) {
+        if (is_current(generation)) {
+            on_data_(data, size);
+        }
+    };
+
     // Body bytes async_read_header read past the header stay in buffer and are parsed by the first read
     std::array<char, 8192> body_buf;
 
     // Read body continuously
-    while (!parser.is_done() &&
-           !should_close_.load(std::memory_order_acquire) &&
-           status_.load(std::memory_order_acquire) == Status::CONNECTED)
+    while (!parser.is_done() && is_current(generation))
     {
         auto& body = res.body();
         body.data = body_buf.data();
@@ -408,10 +515,15 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
             asio::as_tuple(asio::use_awaitable)
         );
 
+        if (!is_current(generation)) {
+            // close() cancelled the read, or was called while the read completed; drop what it decoded
+            break;
+        }
+
         // Deliver what was decoded, even if the read then stopped with an error
         if (const auto decoded = body_buf.size() - body.size; decoded > 0) {
             if (is_sse) {
-                sse_parser_.feed(body_buf.data(), decoded, on_data_);
+                sse_parser_.feed(body_buf.data(), decoded, deliver_event);
             } else {
                 on_data_(body_buf.data(), decoded);
             }
@@ -422,13 +534,11 @@ asio::awaitable<bool> HttpStream::stream_response(Stream& stream) {
             continue;
         }
 
-        if (should_close_.load(std::memory_order_acquire)) {
-            // close() cancelled the read
-            break;
+        // Not reported once onData has called close()
+        if (is_current(generation)) {
+            LOG_ERROR("HTTP Stream read error: {}", ec.message());
+            on_error_(ec.message());
         }
-
-        LOG_ERROR("HTTP Stream read error: {}", ec.message());
-        on_error_(ec.message());
         break;
     }
 

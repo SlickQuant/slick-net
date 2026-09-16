@@ -55,7 +55,20 @@ public:
     HttpStream(HttpStream&&) noexcept = delete;
     HttpStream& operator=(HttpStream&&) noexcept = delete;
 
+    // Starts a session: looks up the host, connects and streams the response. Does nothing while the stream is
+    // CONNECTING or CONNECTED, so a stream never runs two sessions at once. After close(), or once the response
+    // has ended, it starts a new session; if the previous session is still ending, the new one starts after it
+    // ends, so the two sessions' callbacks never interleave. Every open() that starts a session gets exactly one
+    // onDisconnected, even if close() ends the session before it connects. Lock-free; safe to call from any
+    // thread and from the stream's callbacks.
     void open();
+
+    // Ends the session: status() reads DISCONNECTED at once, and whatever the session is waiting on (connect,
+    // TLS handshake, request or response I/O) is cancelled. A DNS lookup already running cannot be interrupted,
+    // so its result is thrown away when it returns. After close() the session runs no more onConnected,
+    // onData or onError callbacks (one already running finishes), and onDisconnected follows once the session
+    // has ended. Does nothing if the stream is not open. Lock-free; safe to call from any thread and from the
+    // stream's callbacks.
     void close();
 
     // Whether the shared service is running
@@ -81,13 +94,18 @@ public:
     Status status() const noexcept;
 
 private:
-    struct socket_registration;  // Defined in http_stream.cpp
+    struct session_io;  // Defined in http_stream.cpp
 
-    boost::asio::awaitable<void> do_stream_session();
-    boost::asio::awaitable<void> do_stream_session_ssl();
-    boost::asio::awaitable<void> do_stream_session_plain();
+    bool is_current(std::uint64_t generation) const noexcept;
+    void throw_if_closed(std::uint64_t generation) const;
+    bool end_generation(std::uint64_t generation) noexcept;
+    void serve();
+    boost::asio::awaitable<void> serve_sessions();
+    boost::asio::awaitable<void> run_session(std::uint64_t generation);
+    boost::asio::awaitable<void> do_stream_session_ssl(std::uint64_t generation);
+    boost::asio::awaitable<void> do_stream_session_plain(std::uint64_t generation);
     template <typename Stream>
-    boost::asio::awaitable<bool> stream_response(Stream& stream);
+    boost::asio::awaitable<bool> stream_response(std::uint64_t generation, Stream& stream);
 
 private:
     std::string url_;
@@ -102,10 +120,13 @@ private:
     std::function<void(std::string err)> on_error_;
     boost::asio::any_io_executor executor_;  // Strand this stream's sessions and close() run on
     const bool use_service_;                 // executor_ is a strand of the shared service
-    std::atomic<Status> status_{ Status::DISCONNECTED };
-    std::atomic_bool should_close_{false};
-    detail::sse_parser sse_parser_;  // Parses text/event-stream bodies; executor_ only
-    socket_registration* registered_socket_ = nullptr;  // Socket close() cancels; executor_ only
+    // The generation, the number of open() calls that started a session, above the Status in the lowest two bits.
+    // Packed so open(), close() and the session change both in a single compare-and-swap.
+    std::atomic<std::uint64_t> state_{ static_cast<std::uint64_t>(Status::DISCONNECTED) };
+    detail::sse_parser sse_parser_;          // Parses text/event-stream bodies; executor_ only
+    bool serving_ = false;                   // serve_sessions() is running; executor_ only
+    std::uint64_t served_generation_ = 0;    // Newest generation serve_sessions() has taken up; executor_ only
+    session_io* session_io_ = nullptr;       // I/O of the running session that close() cancels; executor_ only
 };
 
 } // namespace slick::net

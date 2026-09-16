@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <array>
 #include <memory>
 #include <atomic>
 #include <chrono>
@@ -58,18 +59,27 @@ protected:
         return pred();
     }
 
-    // What an HttpStream delivered; payloads and errors are only safe to read once disconnected is set
+    // What an HttpStream delivered; events, payloads and errors are only safe to read once no callback can still run
     struct stream_capture {
         std::atomic<bool> connected{false};
         std::atomic<bool> disconnected{false};
+        std::atomic<int> connects{0};
+        std::atomic<int> disconnects{0};
+        std::string events;  // 'C' for each onConnected, 'E' for each onError and 'D' for each onDisconnected, in order
         std::vector<std::string> payloads;
         std::vector<std::string> errors;
     };
 
-    // Opens an HttpStream to a loopback plain HTTP server on port that records what it delivers into capture.
-    // A null executor runs the stream on the shared HttpStream service.
-    std::shared_ptr<HttpStream> open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture,
+    // Opens an HttpStream to url that records what it delivers into capture. A null executor runs the stream on the
+    // shared HttpStream service.
+    std::shared_ptr<HttpStream> open_captured_stream(std::string url, std::shared_ptr<stream_capture> capture,
                                                      boost::asio::any_io_executor executor = {});
+
+    // Opens a captured HttpStream to a loopback plain HTTP server on port
+    std::shared_ptr<HttpStream> open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture,
+                                                     boost::asio::any_io_executor executor = {}) {
+        return open_captured_stream(std::format("http://127.0.0.1:{}/stream", port), std::move(capture), std::move(executor));
+    }
 
     // Streams a scripted_response_server's response, pausing between segments, and waits for the stream to disconnect
     std::shared_ptr<stream_capture> stream_scripted_response(std::vector<std::string> segments,
@@ -1194,16 +1204,28 @@ private:
     std::thread thread_;
 };
 
-std::shared_ptr<HttpStream> HttpTest::open_captured_stream(uint16_t port, std::shared_ptr<stream_capture> capture,
+std::shared_ptr<HttpStream> HttpTest::open_captured_stream(std::string url, std::shared_ptr<stream_capture> capture,
                                                            boost::asio::any_io_executor executor) {
-    // Callbacks share ownership so a stream that outlives its test never touches a dead capture
+    // Callbacks share ownership so a stream that outlives its test never touches a dead capture. Each records its
+    // event before the atomics a test waits on, so the event is visible once the wait ends.
     auto stream = std::make_shared<HttpStream>(
         std::move(executor),
-        std::format("http://127.0.0.1:{}/stream", port),
-        [capture] { capture->connected.store(true, std::memory_order_release); },
-        [capture] { capture->disconnected.store(true, std::memory_order_release); },
+        std::move(url),
+        [capture] {
+            capture->events += 'C';
+            capture->connects.fetch_add(1, std::memory_order_release);
+            capture->connected.store(true, std::memory_order_release);
+        },
+        [capture] {
+            capture->events += 'D';
+            capture->disconnects.fetch_add(1, std::memory_order_release);
+            capture->disconnected.store(true, std::memory_order_release);
+        },
         [capture](const char* data, size_t size) { capture->payloads.emplace_back(data, size); },
-        [capture](std::string err) { capture->errors.push_back(std::move(err)); }
+        [capture](std::string err) {
+            capture->events += 'E';
+            capture->errors.push_back(std::move(err));
+        }
     );
     stream->open();
     return stream;
@@ -1505,6 +1527,199 @@ TEST_F(HttpTest, HttpStream_OpenAfterShutdown_RestartsService) {
     EXPECT_TRUE(HttpStream::is_running());
     ASSERT_TRUE(capture->disconnected.load(std::memory_order_acquire)) << "stream opened after shutdown() never ran";
     EXPECT_EQ(capture->payloads, (std::vector<std::string>{"event"}));
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Loopback server that serves all the connections it accepts at the same time and counts them. Each connection is
+// sent response once its request has arrived, then held open until the client closes it; with an empty response
+// the server never sends anything, not even its side of a TLS handshake.
+class counting_stream_server {
+public:
+    explicit counting_stream_server(std::string response)
+        : response_(std::move(response))
+        , acceptor_(ioc_, {boost::asio::ip::address_v4::loopback(), 0})
+        , port_(acceptor_.local_endpoint().port()) {
+        boost::asio::co_spawn(ioc_, accept_loop(), boost::asio::detached);
+        thread_ = std::thread([this] { ioc_.run(); });
+    }
+
+    ~counting_stream_server() {
+        ioc_.stop();
+        thread_.join();
+    }
+
+    uint16_t port() const noexcept { return port_; }
+    int accepted() const noexcept { return accepted_.load(std::memory_order_acquire); }
+
+private:
+    boost::asio::awaitable<void> accept_loop() {
+        for (;;) {
+            auto [ec, socket] = co_await acceptor_.async_accept(boost::asio::as_tuple(boost::asio::use_awaitable));
+            if (ec) {
+                co_return;
+            }
+            accepted_.fetch_add(1, std::memory_order_release);
+            boost::asio::co_spawn(ioc_, serve(std::move(socket)), boost::asio::detached);
+        }
+    }
+
+    boost::asio::awaitable<void> serve(boost::asio::ip::tcp::socket socket) {
+        const auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
+        if (!response_.empty()) {
+            std::string request;
+            if (auto [ec, n] = co_await boost::asio::async_read_until(socket, boost::asio::dynamic_buffer(request), "\r\n\r\n", token); ec) {
+                co_return;
+            }
+            if (auto [ec, n] = co_await boost::asio::async_write(socket, boost::asio::buffer(response_), token); ec) {
+                co_return;
+            }
+        }
+        std::array<char, 1024> discard;
+        for (;;) {
+            if (auto [ec, n] = co_await socket.async_read_some(boost::asio::buffer(discard), token); ec) {
+                co_return;
+            }
+        }
+    }
+
+    boost::asio::io_context ioc_;
+    std::string response_;
+    boost::asio::ip::tcp::acceptor acceptor_;
+    uint16_t port_;
+    std::atomic<int> accepted_{0};
+    std::thread thread_;
+};
+
+// A complete text/event-stream response carrying the single event "event"
+const std::string single_event_response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 13\r\n\r\ndata: event\n\n";
+
+// Regression: every open() started a session of its own, so open() on an open stream connected a second time beside
+// the first, and close() could cancel only the session that had registered its socket last.
+TEST_F(HttpTest, HttpStream_OpenWhileOpen_KeepsOneSession) {
+    counting_stream_server server{chunked_sse_header};
+    auto capture = std::make_shared<stream_capture>();
+    auto stream = open_captured_stream(server.port(), capture);
+    stream->open();  // While connecting
+    ASSERT_TRUE(wait_for_condition([&] { return capture->connected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    stream->open();  // While connected
+
+    // Give a second session time to connect
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(server.accepted(), 1);
+    EXPECT_EQ(stream->status(), HttpStream::Status::CONNECTED);
+
+    stream->close();
+    ASSERT_TRUE(wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    // Give a second session time to end as well
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_EQ(capture->connects.load(std::memory_order_acquire), 1);
+    ASSERT_EQ(capture->disconnects.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(capture->events, "CD");
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Regression: open() cleared the request of an earlier close(), and close() could cancel only a socket that a session
+// had registered after connecting, so every open() connected - even ones closed before their session had started.
+TEST_F(HttpTest, HttpStream_ClosedBeforeSessionStarts_NeverConnects) {
+    counting_stream_server server{single_event_response};
+    // Run only after the calls below, so no session can start in between
+    boost::asio::io_context ioc;
+    auto capture = std::make_shared<stream_capture>();
+
+    auto stream = open_captured_stream(server.port(), capture, ioc.get_executor());
+    stream->close();
+    EXPECT_EQ(stream->status(), HttpStream::Status::DISCONNECTED);
+    stream->open();
+    stream->close();
+    stream->open();
+    EXPECT_EQ(stream->status(), HttpStream::Status::CONNECTING);
+
+    // Returns once the last session has ended, leaving nothing to run
+    ioc.run_for(std::chrono::seconds(10));
+
+    ASSERT_TRUE(capture->disconnected.load(std::memory_order_acquire)) << "the last session did not end";
+    // One onDisconnected for every open(), but only the last one, never closed, connects
+    EXPECT_EQ(capture->events, "DDCD");
+    EXPECT_EQ(capture->payloads, (std::vector<std::string>{"event"}));
+    EXPECT_EQ(server.accepted(), 1);
+    EXPECT_EQ(stream->status(), HttpStream::Status::DISCONNECTED);
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Regression: close() followed at once by open() left the closing session running beside the new one. open() cleared
+// the close request, so the old session reported its cancelled read as an error, and its onDisconnected could come
+// after the new session had connected.
+TEST_F(HttpTest, HttpStream_CloseThenOpen_EndsPreviousSessionFirst) {
+    counting_stream_server server{chunked_sse_header};
+    auto capture = std::make_shared<stream_capture>();
+    auto stream = open_captured_stream(server.port(), capture);
+    ASSERT_TRUE(wait_for_condition([&] { return capture->connects.load(std::memory_order_acquire) == 1; }, std::chrono::seconds(10)));
+    // Let the session start waiting on its body read
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    stream->close();
+    stream->open();
+    ASSERT_TRUE(wait_for_condition([&] { return capture->connects.load(std::memory_order_acquire) == 2; }, std::chrono::seconds(10)));
+    // A late end of the first session would overwrite the second session's status
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(stream->status(), HttpStream::Status::CONNECTED);
+    EXPECT_EQ(server.accepted(), 2);
+
+    stream->close();
+    ASSERT_TRUE(wait_for_condition([&] { return capture->disconnects.load(std::memory_order_acquire) == 2; }, std::chrono::seconds(10)));
+    EXPECT_EQ(capture->events, "CDCD");
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// Regression: a session registered its socket for close() to cancel only once it had connected and finished the TLS
+// handshake, so close() could not interrupt the DNS lookup, the connect or the handshake. Against a server that never
+// answered the handshake, the closed stream stayed until the 30 s handshake timeout.
+TEST_F(HttpTest, HttpStream_Close_InterruptsTlsHandshake) {
+    counting_stream_server server{""};
+    auto capture = std::make_shared<stream_capture>();
+    auto stream = open_captured_stream(std::format("https://127.0.0.1:{}/stream", server.port()), capture);
+    ASSERT_TRUE(wait_for_condition([&] { return server.accepted() == 1; }, std::chrono::seconds(10)));
+    // Let the session start waiting on the server's side of the handshake
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto begin = std::chrono::steady_clock::now();
+    stream->close();
+    ASSERT_TRUE(wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10)))
+        << "close() did not interrupt the TLS handshake";
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+
+    EXPECT_LT(elapsed_ms, 1000) << "close() waited for the handshake to time out";
+    EXPECT_EQ(capture->events, "D");
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
+}
+
+// open() from onDisconnected starts the next session once the one that ended has finished
+TEST_F(HttpTest, HttpStream_OpenFromOnDisconnected_Reconnects) {
+    counting_stream_server server{single_event_response};
+    auto capture = std::make_shared<stream_capture>();
+    auto weak_stream = std::make_shared<std::weak_ptr<HttpStream>>();
+    auto stream = std::make_shared<HttpStream>(
+        std::format("http://127.0.0.1:{}/stream", server.port()),
+        [capture] { capture->events += 'C'; },
+        [capture, weak_stream] {
+            capture->events += 'D';
+            // Reopen once, from inside the callback
+            if (capture->disconnects.fetch_add(1, std::memory_order_acq_rel) == 0) {
+                if (auto self = weak_stream->lock()) {
+                    self->open();
+                }
+            }
+        },
+        [capture](const char* data, size_t size) { capture->payloads.emplace_back(data, size); },
+        [capture](std::string err) { capture->errors.push_back(std::move(err)); });
+    *weak_stream = stream;
+    stream->open();
+
+    ASSERT_TRUE(wait_for_condition([&] { return capture->disconnects.load(std::memory_order_acquire) == 2; }, std::chrono::seconds(10)));
+    EXPECT_EQ(capture->events, "CDCD");
+    EXPECT_EQ(capture->payloads, (std::vector<std::string>{"event", "event"}));
+    EXPECT_EQ(server.accepted(), 2);
+    EXPECT_EQ(stream->status(), HttpStream::Status::DISCONNECTED);
     EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
 }
 
