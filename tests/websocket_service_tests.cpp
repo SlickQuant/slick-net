@@ -191,4 +191,69 @@ TEST_F(WebsocketServiceTest, ShutdownWhileBusyPollingThenRestart) {
     EXPECT_TRUE(service_busy_polling());
 }
 
+// Regression: callbacks run on the service thread, so shutdown() from one had that thread join itself.
+// join() threw resource_deadlock_would_occur and left the static thread object joinable, and because the
+// service was already flagged stopped the terminator's shutdown() skipped the join - so the thread
+// object's destructor terminated the process during static teardown, and an open() before that
+// terminated on the move-assignment onto a joinable thread.
+TEST_F(WebsocketServiceTest, ShutdownFromCallbackDoesNotSelfJoin) {
+    std::atomic_bool callback_done{false};
+    std::atomic_bool shutdown_threw{false};
+    std::atomic<std::thread::id> service_thread_id{};
+    std::atomic<std::thread::id> callback_thread_id{};
+    std::string thrown;  // only safe to read once shutdown_threw is set
+    {
+        // Nothing listens on port 1, so the connect fails and onError runs on the service thread
+        Websocket<> ws(
+            "ws://127.0.0.1:1/",
+            []() {},
+            []() {},
+            [](const char*, std::size_t) {},
+            [&](std::string&&) {
+                callback_thread_id.store(std::this_thread::get_id(), std::memory_order_release);
+                try {
+                    Websocket<>::shutdown();
+                } catch (const std::exception& e) {
+                    thrown = e.what();
+                    shutdown_threw.store(true, std::memory_order_release);
+                }
+                callback_done.store(true, std::memory_order_release);
+            });
+
+        // The service thread is the only thread that runs the websocket io_context, so a handler queued
+        // on it reports the id the callback must share for its shutdown() to have been a self-join.
+        // Queued before open() so it is ahead of the session's own handlers however they race.
+        boost::asio::post(detail::websocket_ioc(), [&] {
+            service_thread_id.store(std::this_thread::get_id(), std::memory_order_release);
+        });
+        ws.open();
+
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (!callback_done.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(10ms);
+        }
+    }
+
+    ASSERT_TRUE(callback_done.load(std::memory_order_acquire)) << "the error callback never ran";
+    EXPECT_FALSE(shutdown_threw.load(std::memory_order_acquire)) << "shutdown() threw: " << thrown;
+    EXPECT_FALSE(Websocket<>::is_running());
+
+    // Without these the test would still pass if callbacks ever moved off the service thread, where
+    // shutdown() is an ordinary join and none of the regression is exercised
+    ASSERT_NE(service_thread_id.load(std::memory_order_acquire), std::thread::id{})
+        << "the service thread never ran the posted handler";
+    EXPECT_EQ(callback_thread_id.load(std::memory_order_acquire), service_thread_id.load(std::memory_order_acquire))
+        << "the callback did not run on the service thread, so its shutdown() was not a self-join";
+
+    // Joins the thread the callback's shutdown() could only ask to stop, the way the terminator does at
+    // program exit. It also makes the restart below deterministic: the service can only start again
+    // once the previous thread has cleared init_service_thread_ on its way out.
+    Websocket<>::shutdown();
+
+    // Reusing the thread object move-assigns a new thread onto it
+    ASSERT_TRUE(run_failed_connection());
+    EXPECT_TRUE(Websocket<>::is_running());
+}
+
 } // namespace slick::net

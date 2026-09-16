@@ -113,6 +113,13 @@ public:
 
     void send(const char* buffer, std::size_t len, bool is_binary = false, bool suppress_log = false);
     void send_binary_data(const char* buffer, std::size_t len, bool suppress_log = false);
+
+    // Stops the service thread shared by every Websocket<BufferT> and joins it; the next open() starts
+    // it again. Safe to call from a callback (onConnected, onDisconnected, onData, onError): those run
+    // on the service thread, which cannot join itself, so from one it only requests the stop and
+    // returns - is_running() reads false at once, while the thread finishes after the callback returns
+    // and is joined by the next shutdown() from another thread, by the next open(), or at program exit.
+    // It joins the service thread, so never call it from a signal handler.
     static void shutdown();
 
     // Idle strategy of the service thread shared by every Websocket<BufferT>.

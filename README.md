@@ -481,7 +481,7 @@ Websocket<BufferT>(
 - `void send_binary_data(const char* buffer, size_t len, bool suppress_log = false)` - Send binary data through the WebSocket
 - `Status status() const` - Get current connection status
 - `void detach()` - Suppress callbacks from this object's session (used internally during teardown/reconnect)
-- `static void shutdown()` - Shutdown all WebSocket services
+- `static void shutdown()` - Stop the shared service thread and join it; the next `open()` starts it again. Safe to call from a callback: the service thread cannot join itself, so from one it only requests the stop and returns, and the join happens at the next `shutdown()` from another thread, at the next `open()`, or at program exit
 - `static void set_busy_poll(bool enable)` - Switch the service thread between blocking and busy polling (see [Busy Polling](#busy-polling) below)
 - `static bool busy_poll()` - Whether the service thread busy-polls
 

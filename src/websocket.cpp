@@ -40,11 +40,24 @@ std::uint64_t websocket_service_loop_iterations() noexcept {
     return service_loop_iterations_.load(std::memory_order_acquire);
 }
 
+// Joins the service thread once it has finished. Never reached from the service thread itself: a thread
+// cannot join itself, and the only caller that could run there is start_websocket_service(), which gets
+// past its exchange only after the previous thread cleared init_service_thread_ - its last statement,
+// long after its final callback.
+void join_service_thread() {
+    if (service_thread_.joinable()) {
+        service_thread_.join();
+    }
+}
+
 void start_websocket_service() {
     auto init_service = init_service_thread_.load(std::memory_order_relaxed);
     if (init_service_thread_.compare_exchange_strong(init_service, true,
                                                      std::memory_order_acq_rel) && !init_service) {
         run_.store(true, std::memory_order_release);
+        // A shutdown() from a callback cannot join the thread it runs on, so this object may still hold
+        // that finished thread; move-assigning onto a joinable std::thread would terminate the process.
+        join_service_thread();
         service_thread_ = std::thread([]() {
             LOG_INFO("Websocket service thread started.");
             // Clear a stop() left by a previous shutdown() or busy-poll switch
@@ -89,14 +102,21 @@ void start_websocket_service() {
 }
 
 void stop_websocket_service() {
-    if (run_.load(std::memory_order_relaxed)) {
+    if (run_.exchange(false, std::memory_order_acq_rel)) {
         LOG_DEBUG("Shutting down WebSocket service thread.");
-        run_.store(false, std::memory_order_release);
         ioc_.stop();
-        if (service_thread_.joinable()) {
-            service_thread_.join();
-        }
     }
+
+    // Callbacks run on the service thread, so a shutdown() from one would have the thread join itself:
+    // that throws resource_deadlock_would_occur and leaves this object joinable, and a joinable
+    // std::thread terminates the process when it is destroyed or assigned over. Requesting the stop is
+    // enough here - the loop exits once the callback returns, and the join happens in the terminator
+    // below, in a later shutdown() from another thread, or before start_websocket_service() reuses the
+    // object. The join is no longer gated on run_, so it still runs for a thread stopped this way.
+    if (service_thread_.get_id() == std::this_thread::get_id()) {
+        return;
+    }
+    join_service_thread();
 }
 
 struct WebsocketServiceTerminater {
