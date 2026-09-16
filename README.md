@@ -148,13 +148,15 @@ checks `should_log()` before evaluating its arguments.
 ### URLs
 
 `Http`, `HttpStream` and `Websocket` accept `[scheme://]host[:port][/path][?query]`. The host
-may be a name, an IPv4 address or a bracketed IPv6 literal (`http://[::1]:8080/feed`). Without a
-scheme `https`/`wss` is assumed; without a port, 80 is used for `http`/`ws` and 443 otherwise.
+may be a name, an IPv4 address or a bracketed IPv6 literal (`http://[::1]:8080/feed`). The scheme
+must be `http`/`https` for `Http` and `HttpStream`, or `ws`/`wss` for `Websocket` (matched
+case-insensitively); without a scheme `https`/`wss` is assumed. Without a port, 80 is used for
+`http`/`ws` and 443 for `https`/`wss`.
 The `Host` header of `Http` and `HttpStream` requests carries the port only when it is not the
 connection's default (80, or 443 with TLS), e.g. `Host: api.example.com:8080`.
-A `#fragment` is not sent. A port outside 1-65535 or an unterminated `[` is rejected with
-`std::invalid_argument`: `Http` reports it as a `500` response, while the `HttpStream` and
-`Websocket` constructors throw it.
+A `#fragment` is not sent. Any other scheme, a port outside 1-65535 or an unterminated `[` is
+rejected with `std::invalid_argument`: `Http` reports it as a `500` response, the `HttpStream`
+constructor throws it, and `Websocket::open()` throws it.
 
 ### TLS Certificate Verification
 

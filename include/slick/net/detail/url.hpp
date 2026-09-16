@@ -16,15 +16,36 @@ struct url_parts {
     bool use_ssl;
 };
 
+// ASCII case-insensitive equality, for URL schemes (RFC 3986 section 3.1)
+inline bool scheme_equals(std::string_view scheme, std::string_view expected) noexcept {
+    if (scheme.size() != expected.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < scheme.size(); ++i) {
+        const char c = scheme[i];
+        if ((c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c) != expected[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Parses "[scheme://]authority[/path][?query][#fragment]" where authority is "host", "host:port",
-// "[ipv6]" or "[ipv6]:port". A missing scheme means `secure_scheme`; a missing or empty port means
-// 80 for `plain_scheme` and 443 otherwise. An unbracketed authority with several colons is taken
+// "[ipv6]" or "[ipv6]:port". The scheme must be `plain_scheme` or `secure_scheme` (lowercase,
+// matched case-insensitively); a missing scheme means `secure_scheme`. A "://" after the start of
+// the path, query or fragment is not a scheme delimiter. A missing or empty port means 80 for
+// `plain_scheme` and 443 for `secure_scheme`. An unbracketed authority with several colons is taken
 // as an IPv6 literal without a port. The fragment is dropped (it is never sent to the server).
-// Throws std::invalid_argument for an unterminated bracket or a port that is not 1-65535.
+// Throws std::invalid_argument for any other scheme, an unterminated bracket or a port that is not 1-65535.
 inline url_parts parse_url_parts(std::string_view url, std::string_view plain_scheme, std::string_view secure_scheme) {
-    std::string_view scheme = secure_scheme;
-    if (const auto pos = url.find("://"); pos != std::string_view::npos) {
-        scheme = url.substr(0, pos);
+    bool use_ssl = true;
+    if (const auto pos = url.find("://"); pos != std::string_view::npos && pos < url.find_first_of("/?#")) {
+        const std::string_view scheme = url.substr(0, pos);
+        use_ssl = scheme_equals(scheme, secure_scheme);
+        if (!use_ssl && !scheme_equals(scheme, plain_scheme)) {
+            throw std::invalid_argument("Unsupported URL scheme '" + std::string(scheme) + "', expected '" +
+                                        std::string(plain_scheme) + "' or '" + std::string(secure_scheme) + "'");
+        }
         url.remove_prefix(pos + 3);
     }
     url = url.substr(0, url.find('#'));
@@ -52,7 +73,7 @@ inline url_parts parse_url_parts(std::string_view url, std::string_view plain_sc
         port = authority.substr(colon + 1);
     }
 
-    url_parts parts{std::string(host), {}, static_cast<uint16_t>(scheme == plain_scheme ? 80 : 443), scheme == secure_scheme};
+    url_parts parts{std::string(host), {}, static_cast<uint16_t>(use_ssl ? 443 : 80), use_ssl};
     if (!port.empty()) {
         const auto [end, ec] = std::from_chars(port.data(), port.data() + port.size(), parts.port);
         if (ec != std::errc{} || end != port.data() + port.size() || parts.port == 0) {

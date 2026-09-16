@@ -335,6 +335,29 @@ TEST_F(HttpTest, ParseUrl_RejectsMalformedAuthority) {
     }
 }
 
+// Regression: any scheme other than "http" was taken as a plaintext connection on port 443, so
+// "ftp://h/" or "HTTP://h/" silently spoke plain HTTP to port 443.
+TEST_F(HttpTest, ParseUrl_RejectsUnsupportedScheme) {
+    for (const auto* url : {"ftp://h/", "ws://h/", "wss://h/", "httpx://h/", "htt://h/", "://h/", "file:///etc/hosts"}) {
+        EXPECT_THROW(parse_url(url), std::invalid_argument) << url;
+    }
+    // Schemes are case-insensitive
+    EXPECT_EQ(parse_url("HTTP://h:8080/p"), (url_tuple{"h", "/p", "8080", false, "h:8080"}));
+    EXPECT_EQ(parse_url("Https://h/p"), (url_tuple{"h", "/p", "443", true, "h"}));
+    // A "://" inside the path or query of a scheme-less URL is not a scheme delimiter
+    EXPECT_EQ(parse_url("h/cb?next=ftp://x"), (url_tuple{"h", "/cb?next=ftp://x", "443", true, "h"}));
+    EXPECT_EQ(parse_url("h:8443?u=a://b"), (url_tuple{"h", "/?u=a://b", "8443", true, "h:8443"}));
+    EXPECT_EQ(parse_url("http://h/r?to=https://x"), (url_tuple{"h", "/r?to=https://x", "80", false, "h"}));
+
+    auto response = Http::get("ftp://127.0.0.1/");
+    EXPECT_EQ(response.result_code, 500);
+    EXPECT_NE(response.result_text.find("Unsupported URL scheme"), std::string::npos) << response.result_text;
+
+    EXPECT_THROW((void)std::make_shared<HttpStream>("ws://127.0.0.1/", [] {}, [] {}, [](const char*, std::size_t) {},
+                                                    [](std::string) {}),
+                 std::invalid_argument);
+}
+
 TEST_F(HttpTest, FormatAuthority_BracketsIpv6) {
     EXPECT_EQ(detail::format_authority("example.com"), "example.com");
     EXPECT_EQ(detail::format_authority("::1"), "[::1]");

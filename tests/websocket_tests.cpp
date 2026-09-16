@@ -205,6 +205,22 @@ TEST_F(WebsocketTest, UrlParserHandlesIpv6Literals) {
     EXPECT_THROW(detail::parse_websocket_url("ws://[::1:9000/feed"), std::invalid_argument);
 }
 
+// Regression: any scheme other than "ws" was taken as a plaintext connection on port 443, so
+// "https://h/" opened an unencrypted WebSocket to port 443.
+TEST_F(WebsocketTest, UrlParserRejectsUnsupportedScheme) {
+    for (const auto* url : {"http://h/", "https://h/", "ftp://h/", "wsx://h/", "://h/"}) {
+        EXPECT_THROW(detail::parse_websocket_url(url), std::invalid_argument) << url;
+    }
+
+    auto upper = detail::parse_websocket_url("WSS://h/feed");
+    EXPECT_EQ(upper.port, 443);
+    EXPECT_TRUE(upper.use_ssl);
+
+    Websocket ws("https://127.0.0.1/", [] {}, [] {}, [](const char*, std::size_t) {}, [](std::string&&) {});
+    EXPECT_THROW(ws.open(), std::invalid_argument);
+    EXPECT_EQ(ws.status(), Websocket<>::Status::DISCONNECTED);
+}
+
 TEST_F(WebsocketTest, StatusTransitions) {
     std::atomic<bool> connected_called{false};
     std::atomic<bool> disconnected_called{false};
