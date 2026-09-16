@@ -22,6 +22,17 @@ using LogHandler = std::function<void(LogLevel, const char*, std::format_args)>;
 using LogLevelGetter = std::function<LogLevel(void)>;
 using LogHandlerWithLocation = std::function<void(LogLevel, uint32_t /* line */, const char* /* file_name */, bool /* is_static_file_name */, const char*, std::format_args)>;
 
+// The handler and its level getter are installed as one immutable pair, swapped
+// atomically, so these may be called from any thread while other threads are
+// logging: a reader never observes a half-installed handler, nor a new handler
+// paired with the previous getter.
+//
+// A handler already running on another thread can still be executing when these
+// return - clear_log_handler() stops further dispatch but does not wait for a
+// call in flight - so state a handler captures must stay valid until the last
+// call that can reach it has finished. A replaced handler is also retained for
+// the life of the process (freeing it would race with a reader still inside it),
+// so anything it captures by value is never destroyed.
 void set_log_handler(LogHandler handler, LogLevelGetter get_level = []() { return LogLevel::Info; });
 void set_log_handler_with_location(LogHandlerWithLocation handler, LogLevelGetter get_level = []() { return LogLevel::Info; });
 void clear_log_handler() noexcept;

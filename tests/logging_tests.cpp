@@ -4,8 +4,10 @@
 
 #include <atomic>
 #include <format>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace slick::net {
@@ -263,5 +265,79 @@ TEST(LoggingTest, MacroPassesIsStaticTrue) {
 }
 
 #endif  // SLICK_NET_ENABLE_SOURCE_LOCATION
+
+// --- concurrent install / dispatch ---
+
+namespace {
+
+constexpr uint64_t kHandlerMagic = 0xA5A55A5ADEADBEEFull;
+
+struct handler_state {
+    uint64_t magic{ kHandlerMagic };
+    LogLevel level{ LogLevel::Trace };
+};
+
+} // namespace
+
+// Regression: the setters used to overwrite the global std::functions in place
+// while worker threads were reading and invoking them, so a reader could call
+// through a handler that was mid-assignment (or already destroyed).
+TEST(LoggingTest, ConcurrentInstallWhileLoggingIsRaceFree) {
+    constexpr int kLoggerThreads = 4;
+    constexpr int kGenerations = 2000;
+
+    std::atomic_bool stop{ false };
+    std::atomic_uint64_t dispatched{ 0 };
+    std::atomic_uint64_t corrupted{ 0 };
+
+    std::vector<std::thread> loggers;
+    loggers.reserve(kLoggerThreads);
+    for (int i = 0; i < kLoggerThreads; ++i) {
+        loggers.emplace_back([&] {
+            while (!stop.load(std::memory_order_relaxed)) {
+                LOG_INFO("concurrent {}", i);
+                log_message(LogLevel::Error, "direct {}", i);
+            }
+        });
+    }
+
+    // Keep installing until the loggers have dispatched a fair number of times as
+    // well, so the test cannot pass before the swaps and the readers overlap.
+    constexpr uint64_t kMinDispatches = 10000;
+    int generation = 0;
+    while (generation < kGenerations || dispatched.load(std::memory_order_relaxed) < kMinDispatches) {
+        ++generation;
+        // Each generation installs a handler and getter that share fresh state;
+        // both check it, so a torn pair or a dead target shows up as corruption.
+        auto state = std::make_shared<handler_state>();
+        set_log_handler_with_location(
+            [state, &dispatched, &corrupted](LogLevel, uint32_t, const char*, bool, const char*, std::format_args) {
+                if (state->magic != kHandlerMagic) {
+                    corrupted.fetch_add(1, std::memory_order_relaxed);
+                }
+                dispatched.fetch_add(1, std::memory_order_relaxed);
+            },
+            [state, &corrupted]() {
+                if (state->magic != kHandlerMagic) {
+                    corrupted.fetch_add(1, std::memory_order_relaxed);
+                }
+                return state->level;
+            });
+
+        if ((generation & 0xF) == 0) {
+            clear_log_handler();
+        }
+        std::this_thread::yield();
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& logger : loggers) {
+        logger.join();
+    }
+    clear_log_handler();
+
+    EXPECT_EQ(corrupted.load(std::memory_order_relaxed), 0u);
+    EXPECT_GE(dispatched.load(std::memory_order_relaxed), kMinDispatches);
+}
 
 } // namespace slick::net

@@ -133,6 +133,13 @@ slick::net::set_log_handler(
 slick::net::clear_log_handler();
 ```
 
+The handler and its level getter are installed as one immutable pair and swapped
+atomically, so they can be set, replaced or cleared from any thread while HTTP and
+WebSocket worker threads are logging. `clear_log_handler()` stops further dispatch
+but does not wait for a handler already running on another thread, so state a
+handler captures must stay valid until the last call that can reach it has
+finished.
+
 **LogLevel:** `Trace`, `Debug`, `Info`, `Warn`, `Error`, `Fatal`, `Off`
 
 **Macros:** `LOG_TRACE`, `LOG_DEBUG`, `LOG_INFO`, `LOG_WARN`, `LOG_ERROR`, `LOG_FATAL` — each
