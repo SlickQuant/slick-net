@@ -1034,45 +1034,6 @@ TEST_F(HttpTest, HttpStream_InvalidUrl) {
     stream->close();
 }
 
-TEST_F(HttpTest, HttpStream_MultipleStreams) {
-    std::atomic<int> connected_count{0};
-    std::atomic<int> disconnected_count{0};
-    std::atomic<int> data_count{0};
-
-    std::vector<std::shared_ptr<HttpStream>> streams;
-
-    // Create 3 concurrent streams
-    for (int i = 0; i < 3; ++i) {
-        auto stream = std::make_shared<HttpStream>(
-            "https://stream.wikimedia.org/v2/stream/recentchange",
-            [&]() { connected_count++; },
-            [&]() { disconnected_count++; },
-            [&](const char*, size_t) { data_count++; },
-            [](std::string) {}
-        );
-        stream->open();
-        streams.push_back(stream);
-    }
-
-    // Wait for all to connect
-    EXPECT_TRUE(wait_for_condition([&]() { return connected_count.load() == 3; },
-                                    std::chrono::seconds(15)));
-
-    // Wait for some data
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-
-    // Close all streams
-    for (auto& stream : streams) {
-        stream->close();
-    }
-
-    // Wait for all to disconnect
-    EXPECT_TRUE(wait_for_condition([&]() { return disconnected_count.load() == 3; },
-                                    std::chrono::seconds(10)));
-
-    EXPECT_GT(data_count.load(), 0);
-}
-
 TEST_F(HttpTest, HttpStream_StatusCheck) {
     std::atomic<bool> connected{false};
     std::atomic<bool> disconnected{false};
@@ -1396,6 +1357,47 @@ TEST_F(HttpTest, HttpStream_BlockedCallback_DoesNotStallOtherStreams_ServiceThre
     expect_blocked_callback_does_not_stall([&](uint16_t port, std::shared_ptr<stream_capture> capture) {
         return open_captured_stream(port, std::move(capture));
     });
+}
+
+// Several streams on the shared service each run their own session: all of them connect, receive their own
+// event and end, without one holding up the others.
+// This used to open three streams against https://stream.wikimedia.org and wait for all three to connect,
+// which made it depend on a live endpoint's tolerance for concurrent connections from one address - it timed
+// out on CI while the single-stream tests against the same endpoint passed.
+TEST_F(HttpTest, HttpStream_MultipleStreams) {
+    constexpr int stream_count = 3;
+
+    // One server per stream: scripted_response_server answers the connections it accepts in turn, so a single
+    // shared one would serialize the streams instead of running them at the same time
+    std::vector<std::unique_ptr<scripted_response_server>> servers;
+    std::vector<std::shared_ptr<stream_capture>> captures;
+    std::vector<std::shared_ptr<HttpStream>> streams;
+
+    for (int i = 0; i < stream_count; ++i) {
+        servers.push_back(std::make_unique<scripted_response_server>(
+            std::vector<std::string>{chunked_sse_header + http_chunk(std::format("data: stream{}\n\n", i)), "0\r\n\r\n"},
+            std::chrono::milliseconds(20)));
+        auto capture = std::make_shared<stream_capture>();
+        streams.push_back(open_captured_stream(servers.back()->port(), capture));
+        captures.push_back(std::move(capture));
+    }
+
+    for (int i = 0; i < stream_count; ++i) {
+        EXPECT_TRUE(wait_for_condition([&] { return captures[i]->connected.load(std::memory_order_acquire); },
+                                        std::chrono::seconds(10))) << "stream " << i << " never connected";
+    }
+
+    // The final chunk ends each response, so the streams disconnect on their own
+    for (int i = 0; i < stream_count; ++i) {
+        EXPECT_TRUE(wait_for_condition([&] { return captures[i]->disconnected.load(std::memory_order_acquire); },
+                                        std::chrono::seconds(10))) << "stream " << i << " never disconnected";
+    }
+
+    // Each stream received its own event and nothing from its neighbours
+    for (int i = 0; i < stream_count; ++i) {
+        EXPECT_EQ(captures[i]->payloads, (std::vector<std::string>{std::format("stream{}", i)}));
+        EXPECT_TRUE(captures[i]->errors.empty()) << captures[i]->errors.front();
+    }
 }
 
 // A stream on a multi-threaded executor runs its session and close() through one strand: events arrive whole and
