@@ -112,6 +112,7 @@ private:
     std::string host_;
     std::string target_;
     std::string port_;
+    std::string host_header_;  // Host header value, with the port when it is not the default
     bool use_ssl_;
     std::vector<std::pair<std::string, std::string>> headers_;
     std::function<void()> on_connected_;

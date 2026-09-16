@@ -49,7 +49,7 @@ namespace {
 
     // Builds the request message; body is moved into it, so a large payload is never copied
     http::request<http::string_body> make_request(
-        std::string_view host,
+        std::string_view host_header,
         std::string_view target,
         http::verb method,
         const std::vector<std::pair<std::string, std::string>>& headers,
@@ -57,7 +57,7 @@ namespace {
         int version)
     {
         http::request<http::string_body> req{ method, target, version };
-        req.set(http::field::host, detail::format_authority(host));
+        req.set(http::field::host, host_header);
         req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
 
         // Set headers
@@ -73,10 +73,20 @@ namespace {
         return req;
     }
 
+    // Builds the Response for a received message; its body is moved out instead of copied
+    Response make_response(http::response<http::string_body>& res) {
+        Response response;
+        response.result_code = static_cast<uint32_t>(res.result_int());
+        response.reason = std::string(res.reason());
+        response.result_text = std::move(res.body());
+        return response;
+    }
+
     asio::awaitable<Http::Response> do_session_plain_awaitable(
         std::string host,
         std::string target,
         std::string port,
+        std::string host_header,
         http::verb method,
         std::vector<std::pair<std::string, std::string>> headers,
         std::string body,
@@ -96,7 +106,7 @@ namespace {
         co_await stream.async_connect(results);
 
         // Set up an HTTP request message
-        auto req = make_request(host, target, method, headers, std::move(body), version);
+        auto req = make_request(host_header, target, method, headers, std::move(body), version);
 
         // Set the timeout.
         stream.expires_after(std::chrono::seconds(30));
@@ -107,16 +117,13 @@ namespace {
         // This buffer is used for reading and must be persisted
         beast::flat_buffer buffer;
 
-        // Declare a container to hold the response; a string body is moved out instead of copied
+        // Declare a container to hold the response
         http::response<http::string_body> res;
 
         // Receive the HTTP response
         co_await http::async_read(stream, buffer, res);
 
-        Http::Response response;
-        response.result_code = static_cast<uint32_t>(res.result_int());
-        response.result_text = std::move(res.body());
-        response.reason = std::string(res.reason());
+        auto response = make_response(res);
 
         // Set the timeout.
         stream.expires_after(std::chrono::seconds(30));
@@ -137,6 +144,7 @@ namespace {
         std::string host,
         std::string target,
         std::string port,
+        std::string host_header,
         http::verb method,
         std::vector<std::pair<std::string, std::string>> headers,
         std::string body,
@@ -169,7 +177,7 @@ namespace {
         }
 
         // Set up an HTTP request message
-        auto req = make_request(host, target, method, headers, std::move(body), version);
+        auto req = make_request(host_header, target, method, headers, std::move(body), version);
 
         // Set the timeout.
         beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(30));
@@ -180,15 +188,13 @@ namespace {
         // This buffer is used for reading and must be persisted
         beast::flat_buffer buffer;
 
-        // Declare a container to hold the response; a string body is moved out instead of copied
+        // Declare a container to hold the response
         http::response<http::string_body> res;
 
         // Receive the HTTP response
         co_await http::async_read(stream, buffer, res);
 
-        Http::Response response;
-        response.result_code = static_cast<uint32_t>(res.result_int());
-        response.result_text = std::move(res.body());
+        auto response = make_response(res);
 
         // Set the timeout.
         beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(30));
@@ -228,14 +234,16 @@ namespace {
         int version = 11)
     {
         // Parse inside the coroutine so a malformed URL is reported like any other request error
-        auto [host, target, port, use_ssl] = parse_url(url);
+        auto [host, target, port, use_ssl, host_header] = parse_url(url);
 
         // Keep if/else: GCC evaluates both arms of a ?: operand of co_await, so the second
         // call would receive moved-from (empty) arguments and resolve an empty host.
         if (use_ssl) {
-            co_return co_await do_session_ssl_awaitable(std::move(host), std::move(target), std::move(port), method, std::move(headers), std::move(body), version);
+            co_return co_await do_session_ssl_awaitable(std::move(host), std::move(target), std::move(port), std::move(host_header),
+                                                        method, std::move(headers), std::move(body), version);
         }
-        co_return co_await do_session_plain_awaitable(std::move(host), std::move(target), std::move(port), method, std::move(headers), std::move(body), version);
+        co_return co_await do_session_plain_awaitable(std::move(host), std::move(target), std::move(port), std::move(host_header),
+                                                      method, std::move(headers), std::move(body), version);
     }
 
     asio::awaitable<void> do_session(

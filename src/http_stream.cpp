@@ -185,10 +185,11 @@ HttpStream::HttpStream(
     // The strand serializes this stream's sessions and close() even on a multi-threaded executor
     , executor_(executor ? asio::any_io_executor(asio::make_strand(executor)) : asio::any_io_executor(asio::make_strand(ioc_)))
     , use_service_(!executor) {
-    auto [host, target, port, use_ssl] = parse_url(url_);
+    auto [host, target, port, use_ssl, host_header] = parse_url(url_);
     host_ = std::move(host);
     target_ = std::move(target);
     port_ = std::move(port);
+    host_header_ = std::move(host_header);
     use_ssl_ = use_ssl;
 }
 
@@ -442,7 +443,7 @@ asio::awaitable<bool> HttpStream::stream_response(std::uint64_t generation, Stre
 
     // Set up an HTTP GET request for streaming
     http::request<http::string_body> req{ http::verb::get, target_, 11 };
-    req.set(http::field::host, detail::format_authority(host_));
+    req.set(http::field::host, host_header_);
     req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
     req.set(http::field::accept, "text/event-stream");
     req.set(http::field::cache_control, "no-cache");

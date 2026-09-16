@@ -89,4 +89,10 @@ inline std::string format_authority(std::string_view host, uint16_t port = 0) {
     return authority;
 }
 
+// Host header value for a parsed URL: its authority, with ":port" only when the port is not the default
+// for the connection (80, or 443 with TLS), the form browsers and curl send.
+inline std::string format_host_header(const url_parts& parts) {
+    return format_authority(parts.host, parts.port == (parts.use_ssl ? 443 : 80) ? 0 : parts.port);
+}
+
 } // namespace slick::net::detail

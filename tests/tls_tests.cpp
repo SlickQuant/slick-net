@@ -106,7 +106,8 @@ test_certificate make_self_signed_certificate(const char* common_name, const cha
     return {bio_to_string(cert_bio.get()), bio_to_string(key_bio.get())};
 }
 
-// Loopback TLS server: answers HTTP requests with 200 "ok" and accepts WebSocket upgrades.
+// Loopback TLS server: answers HTTP requests with 200 "ok", or with the Host header for the target "/host",
+// and accepts WebSocket upgrades.
 class local_tls_server {
 public:
     explicit local_tls_server(const test_certificate& cert)
@@ -198,7 +199,7 @@ private:
         http::response<http::string_body> res{http::status::ok, req.version()};
         res.set(http::field::content_type, "text/plain");
         res.keep_alive(false);
-        res.body() = "ok";
+        res.body() = req.target() == "/host" ? std::string(req[http::field::host]) : "ok";
         res.prepare_payload();
         co_await http::async_write(stream, res, token);
         co_await stream.async_shutdown(token);
@@ -340,6 +341,41 @@ TEST_F(TlsVerificationTest, HttpAcceptsTrustedCertificate) {
     EXPECT_EQ(response.result_code, 200u) << response.result_text;
     EXPECT_EQ(response.result_text, "ok");
     EXPECT_EQ(server.handshakes(), 1);
+}
+
+// Regression: an https:// response left Response::reason empty while http:// filled it in, and the Host
+// header of a request to a non-default port left out the port.
+TEST_F(TlsVerificationTest, HttpsResponse_HasReasonAndHostHeaderWithPort) {
+    local_tls_server server{*trusted_};
+    const auto url = std::format("https://localhost:{}/host", server.port());
+    const auto expected_host = std::format("localhost:{}", server.port());
+
+    auto response = Http::get(url);
+    EXPECT_EQ(response.result_code, 200u) << response.result_text;
+    EXPECT_EQ(response.reason, "OK");
+    EXPECT_EQ(response.result_text, expected_host);
+
+    asio::io_context ioc;
+    Http::Response awaitable_response;
+    std::string awaitable_error;
+    asio::co_spawn(ioc, Http::async_get(url),
+        [&](std::exception_ptr e, Http::Response rsp) {
+            if (e) {
+                try {
+                    std::rethrow_exception(e);
+                } catch (const std::exception& ex) {
+                    awaitable_error = ex.what();
+                }
+                return;
+            }
+            awaitable_response = std::move(rsp);
+        });
+    ioc.run();
+
+    EXPECT_TRUE(awaitable_error.empty()) << awaitable_error;
+    EXPECT_EQ(awaitable_response.result_code, 200u) << awaitable_response.result_text;
+    EXPECT_EQ(awaitable_response.reason, "OK");
+    EXPECT_EQ(awaitable_response.result_text, expected_host);
 }
 
 TEST_F(TlsVerificationTest, HttpRejectsUntrustedCertificate) {

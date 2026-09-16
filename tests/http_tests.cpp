@@ -286,31 +286,46 @@ TEST_F(HttpTest, SyncRequests_ConcurrentThreads_EachGetsOwnResponse) {
 
 // ======================== URL Parsing Tests ========================
 
-using url_tuple = std::tuple<std::string, std::string, std::string, bool>;
+using url_tuple = std::tuple<std::string, std::string, std::string, bool, std::string>;
 
 // Regression: the parser ignored a colon at offset 3 or 4 of the already scheme-stripped authority,
 // so "abc:8080" resolved the literal host "abc:8080" on the default port.
 TEST_F(HttpTest, ParseUrl_ShortHostWithExplicitPort) {
-    EXPECT_EQ(parse_url("http://abc:8080/feed"), (url_tuple{"abc", "/feed", "8080", false}));
-    EXPECT_EQ(parse_url("https://test:9443"), (url_tuple{"test", "/", "9443", true}));
-    EXPECT_EQ(parse_url("abcd:81/x"), (url_tuple{"abcd", "/x", "81", true}));
-    EXPECT_EQ(parse_url("http://localhost:8080/p"), (url_tuple{"localhost", "/p", "8080", false}));
+    EXPECT_EQ(parse_url("http://abc:8080/feed"), (url_tuple{"abc", "/feed", "8080", false, "abc:8080"}));
+    EXPECT_EQ(parse_url("https://test:9443"), (url_tuple{"test", "/", "9443", true, "test:9443"}));
+    EXPECT_EQ(parse_url("abcd:81/x"), (url_tuple{"abcd", "/x", "81", true, "abcd:81"}));
+    EXPECT_EQ(parse_url("http://localhost:8080/p"), (url_tuple{"localhost", "/p", "8080", false, "localhost:8080"}));
 }
 
 // Regression: "[::1]:8080" split at the first colon, so std::stoi threw on ":1]:8080".
 TEST_F(HttpTest, ParseUrl_Ipv6Literals) {
-    EXPECT_EQ(parse_url("http://[::1]:8080/p?q=1"), (url_tuple{"::1", "/p?q=1", "8080", false}));
-    EXPECT_EQ(parse_url("https://[2001:db8::1]"), (url_tuple{"2001:db8::1", "/", "443", true}));
-    EXPECT_EQ(parse_url("[fe80::1]:9000/x"), (url_tuple{"fe80::1", "/x", "9000", true}));
-    EXPECT_EQ(parse_url("http://::1/"), (url_tuple{"::1", "/", "80", false}));
+    EXPECT_EQ(parse_url("http://[::1]:8080/p?q=1"), (url_tuple{"::1", "/p?q=1", "8080", false, "[::1]:8080"}));
+    EXPECT_EQ(parse_url("https://[2001:db8::1]"), (url_tuple{"2001:db8::1", "/", "443", true, "[2001:db8::1]"}));
+    EXPECT_EQ(parse_url("[fe80::1]:9000/x"), (url_tuple{"fe80::1", "/x", "9000", true, "[fe80::1]:9000"}));
+    EXPECT_EQ(parse_url("http://::1/"), (url_tuple{"::1", "/", "80", false, "[::1]"}));
 }
 
 TEST_F(HttpTest, ParseUrl_AuthorityDelimiters) {
-    EXPECT_EQ(parse_url("http://host:8080?x=1"), (url_tuple{"host", "/?x=1", "8080", false}));
-    EXPECT_EQ(parse_url("https://host:8443#frag"), (url_tuple{"host", "/", "8443", true}));
-    EXPECT_EQ(parse_url("https://host/p#frag"), (url_tuple{"host", "/p", "443", true}));
-    EXPECT_EQ(parse_url("http://host:/p"), (url_tuple{"host", "/p", "80", false}));
-    EXPECT_EQ(parse_url("http://a/b:9000"), (url_tuple{"a", "/b:9000", "80", false}));
+    EXPECT_EQ(parse_url("http://host:8080?x=1"), (url_tuple{"host", "/?x=1", "8080", false, "host:8080"}));
+    EXPECT_EQ(parse_url("https://host:8443#frag"), (url_tuple{"host", "/", "8443", true, "host:8443"}));
+    EXPECT_EQ(parse_url("https://host/p#frag"), (url_tuple{"host", "/p", "443", true, "host"}));
+    EXPECT_EQ(parse_url("http://host:/p"), (url_tuple{"host", "/p", "80", false, "host"}));
+    EXPECT_EQ(parse_url("http://a/b:9000"), (url_tuple{"a", "/b:9000", "80", false, "a"}));
+}
+
+// Regression: the Host header was built from the host alone, so a request to a non-default port named the
+// wrong origin (e.g. "Host: api.example.com" for http://api.example.com:8080/).
+TEST_F(HttpTest, ParseUrl_HostHeaderCarriesOnlyNonDefaultPort) {
+    // Default port of the connection, spelled out or not
+    EXPECT_EQ(std::get<4>(parse_url("http://h/")), "h");
+    EXPECT_EQ(std::get<4>(parse_url("http://h:80/")), "h");
+    EXPECT_EQ(std::get<4>(parse_url("https://h:443/")), "h");
+    EXPECT_EQ(std::get<4>(parse_url("h:443")), "h");
+    EXPECT_EQ(std::get<4>(parse_url("https://[::1]:443/")), "[::1]");
+    // The other scheme's default port is not this connection's default
+    EXPECT_EQ(std::get<4>(parse_url("http://h:443/")), "h:443");
+    EXPECT_EQ(std::get<4>(parse_url("https://h:80/")), "h:80");
+    EXPECT_EQ(std::get<4>(parse_url("http://[::1]:65535/")), "[::1]:65535");
 }
 
 TEST_F(HttpTest, ParseUrl_RejectsMalformedAuthority) {
@@ -337,19 +352,22 @@ TEST_F(HttpTest, SyncGet_Ipv6LiteralWithPort) {
 
     auto response = Http::get(std::format("http://[::1]:{}/host?v=6", server->port()));
     EXPECT_EQ(response.result_code, 200) << response.result_text;
-    EXPECT_EQ(response.result_text, "GET /host?v=6 host=[::1]");
+    EXPECT_EQ(response.result_text, std::format("GET /host?v=6 host=[::1]:{}", server->port()));
 }
 
 // Regression: the session was chosen with `co_await (use_ssl ? ssl_session(std::move(host), ...)
 // : plain_session(std::move(host), ...))`. GCC evaluates both arms there, so the plain session got
 // moved-from arguments and every http:// request failed with "Host not found" while https:// worked.
+// The echoed Host header also checks the port is sent for a non-default port.
 TEST_F(HttpTest, PlainHttp_SyncCallbackAndAwaitable_ReachLoopbackServer) {
     local_echo_server server;
     const auto url = std::format("http://127.0.0.1:{}/host", server.port());
+    const auto host = std::format("host=127.0.0.1:{}", server.port());
 
     auto sync_response = Http::get(url);
     EXPECT_EQ(sync_response.result_code, 200) << sync_response.result_text;
-    EXPECT_EQ(sync_response.result_text, "GET /host host=127.0.0.1");
+    EXPECT_EQ(sync_response.reason, "OK");
+    EXPECT_EQ(sync_response.result_text, "GET /host " + host);
 
     std::atomic<bool> async_done{false};
     Http::Response async_response;
@@ -359,7 +377,7 @@ TEST_F(HttpTest, PlainHttp_SyncCallbackAndAwaitable_ReachLoopbackServer) {
     }, url, "cb");
     ASSERT_TRUE(wait_for_condition([&] { return async_done.load(std::memory_order_acquire); }, std::chrono::seconds(5)));
     EXPECT_EQ(async_response.result_code, 200) << async_response.reason;
-    EXPECT_EQ(async_response.result_text, "PUT /host host=127.0.0.1 cb");
+    EXPECT_EQ(async_response.result_text, "PUT /host " + host + " cb");
 
     boost::asio::io_context ioc;
     Http::Response awaitable_response;
@@ -379,7 +397,7 @@ TEST_F(HttpTest, PlainHttp_SyncCallbackAndAwaitable_ReachLoopbackServer) {
     ioc.run();
     EXPECT_TRUE(awaitable_error.empty()) << awaitable_error;
     EXPECT_EQ(awaitable_response.result_code, 200);
-    EXPECT_EQ(awaitable_response.result_text, "POST /host host=127.0.0.1 coro");
+    EXPECT_EQ(awaitable_response.result_text, "POST /host " + host + " coro");
 }
 
 // Headers and bodies are moved, not copied, through the session coroutines. Every entry point must
@@ -1299,6 +1317,23 @@ TEST_F(HttpTest, HttpStream_TruncatedChunkedBody_ReportsError) {
     ASSERT_EQ(capture->payloads.size(), 1u);
     EXPECT_EQ(capture->payloads.front(), "partial");
     EXPECT_FALSE(capture->errors.empty());
+}
+
+// Regression: the stream request's Host header left out the port, so a stream to a non-default port named the
+// wrong origin.
+TEST_F(HttpTest, HttpStream_HostHeader_IncludesNonDefaultPort) {
+    local_echo_server server;
+    auto capture = std::make_shared<stream_capture>();
+    auto stream = open_captured_stream(std::format("http://127.0.0.1:{}/host", server.port()), capture);
+    ASSERT_TRUE(wait_for_condition([&] { return capture->disconnected.load(std::memory_order_acquire); }, std::chrono::seconds(10)))
+        << "stream did not end with the response";
+
+    std::string body;
+    for (const auto& payload : capture->payloads) {
+        body += payload;
+    }
+    EXPECT_EQ(body, std::format("GET /host host=127.0.0.1:{}", server.port()));
+    EXPECT_TRUE(capture->errors.empty()) << capture->errors.front();
 }
 
 // Regression: each body read had a 2 s timeout so close() was noticed, but Beast closes the socket when a
