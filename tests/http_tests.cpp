@@ -24,6 +24,7 @@
 #include <boost/asio/read.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
@@ -117,6 +118,8 @@ public:
 
     uint16_t port() const noexcept { return port_; }
     int slow_requests() const noexcept { return slow_requests_.load(std::memory_order_acquire); }
+    // Requests whose whole response has been written
+    int answered_requests() const noexcept { return answered_requests_.load(std::memory_order_acquire); }
 
 private:
     boost::asio::awaitable<void> accept_loop() {
@@ -175,7 +178,9 @@ private:
             echo.append(request, header_end, content_length);
         }
         auto response = std::format("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", echo.size(), echo);
-        co_await boost::asio::async_write(socket, boost::asio::buffer(response), token);
+        if (auto [ec, n] = co_await boost::asio::async_write(socket, boost::asio::buffer(response), token); !ec) {
+            answered_requests_.fetch_add(1, std::memory_order_release);
+        }
         boost::system::error_code ec;
         socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
     }
@@ -184,7 +189,20 @@ private:
     boost::asio::ip::tcp::acceptor acceptor_;
     uint16_t port_;
     std::atomic<int> slow_requests_{0};
+    std::atomic<int> answered_requests_{0};
     std::thread thread_;
+};
+
+// An io_context run by a thread of its own, for callbacks and streams that should not run on a shared service
+struct executor_thread {
+    boost::asio::io_context ioc;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work{ioc.get_executor()};
+    std::thread thread{[this] { ioc.run(); }};
+
+    ~executor_thread() {
+        ioc.stop();
+        thread.join();
+    }
 };
 
 // Regression: a synchronous call ran the shared io_context until it had no work left at all, so it
@@ -997,6 +1015,208 @@ TEST_F(HttpTest, AsyncService_ShutdownWithRequestInFlight_ReturnsWithoutWaitingF
         << "shutdown() waited for the in-flight request";
 }
 
+// shutdown() abandons requests in flight, and a later request restarts the service, which resumes them. Their
+// callbacks must still never run: the caller may have destroyed what they use by then, such as the context of
+// the executor a callback was to be posted to.
+TEST_F(HttpTest, AsyncService_RequestAbandonedByShutdown_CallbackNotCalledAfterRestart) {
+    local_echo_server server;
+    const auto slow_url = std::format("http://127.0.0.1:{}/slow", server.port());
+    auto abandoned_calls = std::make_shared<std::atomic<int>>(0);
+    {
+        executor_thread executor;
+        Http::async_get(executor.ioc.get_executor(), [abandoned_calls](Http::Response&&) {
+            abandoned_calls->fetch_add(1, std::memory_order_acq_rel);
+        }, slow_url);
+        Http::async_get([abandoned_calls](Http::Response&&) {
+            abandoned_calls->fetch_add(1, std::memory_order_acq_rel);
+        }, slow_url);
+        ASSERT_TRUE(wait_for_condition([&] { return server.slow_requests() == 2; }, std::chrono::seconds(5)))
+            << "the requests never reached the server";
+        Http::shutdown();
+    }   // The executor's context is gone from here on
+
+    // Answered after the abandoned requests, so once its callback has run the restarted service has received theirs
+    auto restarted = async_get_captured(slow_url);
+    ASSERT_TRUE(wait_for_condition([&] { return restarted->done.load(std::memory_order_acquire); }, std::chrono::seconds(10)))
+        << "request made after shutdown() never ran";
+    EXPECT_EQ(restarted->response.result_text, "GET /slow");
+    EXPECT_EQ(server.answered_requests(), 3);
+    EXPECT_EQ(abandoned_calls->load(std::memory_order_acquire), 0) << "callbacks of requests shutdown() abandoned still ran";
+}
+
+// ======================== Async Callback Dispatch Tests ========================
+
+// Runs the Http service with count callback threads for the scope, restarting it so the count applies
+struct callback_threads_scope {
+    std::size_t saved = Http::callback_threads();
+
+    explicit callback_threads_scope(std::size_t count) {
+        Http::shutdown();
+        Http::set_callback_threads(count);
+    }
+
+    ~callback_threads_scope() {
+        Http::shutdown();
+        Http::set_callback_threads(saved);
+    }
+};
+
+// A callback-based request on the shared service whose callback blocks until release(), or for 10 seconds so a
+// stalled check fails its test instead of hanging it
+class blocked_async_callback {
+public:
+    explicit blocked_async_callback(const std::string& url) {
+        Http::async_get([state = state_](Http::Response&&) {
+            state->in_callback.store(true, std::memory_order_release);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (!state->release.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            state->in_callback.store(false, std::memory_order_release);
+        }, url);
+    }
+
+    // Releases the callback and waits for it to return, so it cannot hold up a later request
+    ~blocked_async_callback() {
+        release();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (in_callback() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    bool in_callback() const noexcept { return state_->in_callback.load(std::memory_order_acquire); }
+    void release() noexcept { state_->release.store(true, std::memory_order_release); }
+
+private:
+    struct state {
+        std::atomic<bool> in_callback{false};
+        std::atomic<bool> release{false};
+    };
+    // Shared with the callback, so a callback that outlives this object never touches dead state
+    std::shared_ptr<state> state_ = std::make_shared<state>();
+};
+
+// Regression: the callbacks of callback-based requests ran inline on the service's only I/O thread, so a callback
+// that blocked kept every other callback-based request from even connecting. They now run on a callback thread.
+TEST_F(HttpTest, AsyncCallback_BlockedCallback_DoesNotStallOtherRequestsIo) {
+    const callback_threads_scope threads{1};
+    local_echo_server server;
+    blocked_async_callback blocked{std::format("http://127.0.0.1:{}/block", server.port())};
+    ASSERT_TRUE(wait_for_condition([&] { return blocked.in_callback(); }, std::chrono::seconds(10)))
+        << "the blocking callback never ran";
+
+    auto other = async_get_captured(std::format("http://127.0.0.1:{}/other", server.port()));
+    const bool answered = wait_for_condition([&] { return server.answered_requests() == 2; }, std::chrono::seconds(5));
+    const bool still_blocked = blocked.in_callback();
+    blocked.release();
+
+    EXPECT_TRUE(still_blocked) << "the blocking callback returned early, so the second request was not tested against it";
+    ASSERT_TRUE(answered) << "the second request's I/O stalled behind the blocked callback";
+    // Its callback waited for the only callback thread, which the blocked callback has now released
+    ASSERT_TRUE(wait_for_condition([&] { return other->done.load(std::memory_order_acquire); }, std::chrono::seconds(10)));
+    EXPECT_EQ(other->response.result_text, "GET /other");
+}
+
+// With more callback threads, a blocked callback holds up only its own thread: other callbacks still run.
+TEST_F(HttpTest, AsyncCallback_BlockedCallback_DoesNotStallOtherCallbacks_CallbackThreads) {
+    const callback_threads_scope threads{2};
+    EXPECT_EQ(Http::callback_threads(), 2u);
+
+    local_echo_server server;
+    blocked_async_callback blocked{std::format("http://127.0.0.1:{}/block", server.port())};
+    ASSERT_TRUE(wait_for_condition([&] { return blocked.in_callback(); }, std::chrono::seconds(10)))
+        << "the blocking callback never ran";
+
+    auto other = async_get_captured(std::format("http://127.0.0.1:{}/other", server.port()));
+    const bool other_done = wait_for_condition([&] { return other->done.load(std::memory_order_acquire); }, std::chrono::seconds(5));
+    const bool still_blocked = blocked.in_callback();
+    blocked.release();
+
+    EXPECT_TRUE(still_blocked) << "the blocking callback returned early, so the second request was not tested against it";
+    ASSERT_TRUE(other_done) << "the second request's callback stalled behind the blocked callback";
+    EXPECT_EQ(other->response.result_text, "GET /other");
+}
+
+// A request given an executor posts its callback there: it runs on that executor's thread, and a callback blocking
+// the service's only callback thread does not hold it up.
+TEST_F(HttpTest, AsyncCallback_CallerExecutor_CallbackRunsThereWhileCallbackThreadIsBlocked) {
+    const callback_threads_scope threads{1};
+    local_echo_server server;
+    executor_thread executor;
+    blocked_async_callback blocked{std::format("http://127.0.0.1:{}/block", server.port())};
+    ASSERT_TRUE(wait_for_condition([&] { return blocked.in_callback(); }, std::chrono::seconds(10)))
+        << "the blocking callback never ran";
+
+    struct executor_capture : async_capture {
+        std::thread::id thread;  // only safe to read once done is set
+    };
+    auto capture = std::make_shared<executor_capture>();
+    Http::async_post(executor.ioc.get_executor(), [capture](Http::Response&& response) {
+        capture->thread = std::this_thread::get_id();
+        capture->response = std::move(response);
+        capture->done.store(true, std::memory_order_release);
+    }, std::format("http://127.0.0.1:{}/executor", server.port()), "body");
+    const bool done = wait_for_condition([&] { return capture->done.load(std::memory_order_acquire); }, std::chrono::seconds(5));
+    const bool still_blocked = blocked.in_callback();
+    blocked.release();
+
+    EXPECT_TRUE(still_blocked) << "the blocking callback returned early, so the request was not tested against it";
+    ASSERT_TRUE(done) << "the callback posted to the caller's executor stalled behind the blocked callback";
+    EXPECT_EQ(capture->thread, executor.thread.get_id());
+    EXPECT_EQ(capture->response.result_code, 200) << capture->response.reason;
+    EXPECT_EQ(capture->response.result_text, "POST /executor body");
+}
+
+// Every callback of a request given an executor runs through it - an error response too, and through a strand -
+// so a caller running that context on its own thread needs no synchronization with them.
+TEST_F(HttpTest, AsyncCallback_CallerExecutor_ResponsesAndErrorsRunOnCallersThread) {
+    local_echo_server server;
+    boost::asio::io_context ioc;
+    auto work = boost::asio::make_work_guard(ioc);
+    int calls = 0;
+    std::vector<std::thread::id> callback_threads;
+    Http::Response ok_response;
+    Http::Response error_response;
+    const auto finish = [&] {
+        callback_threads.push_back(std::this_thread::get_id());
+        if (++calls == 2) {
+            work.reset();
+        }
+    };
+    Http::async_put(ioc.get_executor(), [&](Http::Response&& response) {
+        ok_response = std::move(response);
+        finish();
+    }, std::format("http://127.0.0.1:{}/run", server.port()), "body");
+    Http::async_get(boost::asio::make_strand(ioc), [&](Http::Response&& response) {
+        error_response = std::move(response);
+        finish();
+    }, "http://[::1/");
+
+    // Bounded, so a lost callback fails the test instead of hanging it
+    ioc.run_for(std::chrono::seconds(10));
+
+    ASSERT_EQ(calls, 2) << "not every callback ran on the caller's executor";
+    EXPECT_EQ(callback_threads, (std::vector<std::thread::id>(2, std::this_thread::get_id())));
+    EXPECT_EQ(ok_response.result_code, 200) << ok_response.reason;
+    EXPECT_EQ(ok_response.result_text, "PUT /run body");
+    EXPECT_EQ(error_response.result_code, 500);
+    EXPECT_NE(error_response.reason.find("Invalid IPv6 literal"), std::string::npos) << error_response.reason;
+}
+
+// With no callback threads, callbacks run inline on the I/O thread instead of being queued for threads that do
+// not exist.
+TEST_F(HttpTest, AsyncCallback_ZeroCallbackThreads_CallbacksStillRun) {
+    const callback_threads_scope threads{0};
+    EXPECT_EQ(Http::callback_threads(), 0u);
+
+    local_echo_server server;
+    auto capture = async_get_captured(std::format("http://127.0.0.1:{}/inline", server.port()));
+    ASSERT_TRUE(wait_for_condition([&] { return capture->done.load(std::memory_order_acquire); }, std::chrono::seconds(10)))
+        << "callback never ran without callback threads";
+    EXPECT_EQ(capture->response.result_text, "GET /inline");
+}
+
 // ======================== Error Handling Tests ========================
 
 TEST_F(HttpTest, InvalidHostname) {
@@ -1417,18 +1637,6 @@ TEST_F(HttpTest, HttpStream_Reopen_DropsPartialEventOfPreviousResponse) {
 
 // Header of a chunked text/event-stream response
 const std::string chunked_sse_header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
-
-// Runs an io_context on a thread of its own, standing in for an executor an application gives an HttpStream
-struct executor_thread {
-    boost::asio::io_context ioc;
-    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work{ioc.get_executor()};
-    std::thread thread{[this] { ioc.run(); }};
-
-    ~executor_thread() {
-        ioc.stop();
-        thread.join();
-    }
-};
 
 void HttpTest::expect_blocked_callback_does_not_stall(const open_stream_fn& open_other) {
     scripted_response_server blocking_server{{chunked_sse_header + http_chunk("data: block\n\n"), "0\r\n\r\n"}, std::chrono::milliseconds(20)};

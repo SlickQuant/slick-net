@@ -360,17 +360,43 @@ void async_post(std::function<void(Response&&)> on_response, std::string_view ur
 void async_put(std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
 void async_patch(std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
 void async_del(std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
+
+// Same, with on_response posted to executor; a null executor selects the callback threads
+void async_get(boost::asio::any_io_executor executor, std::function<void(Response&&)> on_response, std::string_view url, std::vector<std::pair<std::string, std::string>>&& headers = {});
+void async_post(boost::asio::any_io_executor executor, std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
+void async_put(boost::asio::any_io_executor executor, std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
+void async_patch(boost::asio::any_io_executor executor, std::function<void(Response&&)> on_response, std::string_view url, std::string_view data, std::vector<std::pair<std::string, std::string>>&& headers = {});
+void async_del(boost::asio::any_io_executor executor, std::function<void(Response&&)> on_response, std::string_view url, std::string_view data = "", std::vector<std::pair<std::string, std::string>>&& headers = {});
 ```
 
-Callback-based methods return as soon as the request is queued and run it on a shared service thread that the first such call starts. The callback runs on that thread, so a callback that blocks holds up the other callback-based requests.
+Callback-based methods return as soon as the request is queued. The first such call starts a shared service, and every request's I/O runs on that service's I/O thread. Callbacks never run on the I/O thread, so a slow callback cannot hold up another request's I/O. Where a callback runs:
+
+- **Without an executor:** it runs on the service's callback threads, `Http::callback_threads()` of them, 1 by default. With the default single thread, a callback that blocks makes the callbacks queued behind it wait, but responses keep arriving. With more threads, a blocked callback holds up only its own thread, and different requests' callbacks may run at the same time. `set_callback_threads(0)` runs callbacks inline on the I/O thread instead. That saves a thread hop per response but brings back the stall, so use it only for callbacks that never block.
+- **With an executor**, such as an `io_context` you run, a strand or a `boost::asio::thread_pool`: the callback is posted there, while the request's I/O still runs on the I/O thread. This is the way to receive responses on your own event-loop thread without any synchronization. The request does not count as work on that executor's context, so keep the context running and alive until the callback has run, or until `shutdown()` abandons the request. For an `io_context`, hold a work guard. A callback that throws propagates out of that context's `run()`.
+
+```cpp
+// Run callbacks of requests made without an executor on 4 threads; applies when the service starts
+Http::set_callback_threads(4);
+
+// Or receive the response on your own event loop
+boost::asio::io_context loop;
+auto work = boost::asio::make_work_guard(loop);  // keeps loop.run() waiting for the callback
+Http::async_get(loop.get_executor(), [&work](Http::Response&& rsp) {
+    // runs on the thread running loop.run()
+    work.reset();  // nothing left to wait for, so let run() return
+}, "https://api.example.com/data");
+loop.run();
+```
 
 **Async Service Control:**
 ```cpp
-static bool is_running() noexcept;  // whether the shared async service is running
-static void shutdown();             // stop it and join its thread
+static bool is_running() noexcept;                         // whether the shared async service is running
+static void shutdown();                                    // stop it and join its threads
+static void set_callback_threads(std::size_t count) noexcept;  // callback threads (default 1, 0 = inline on the I/O thread); lock-free, applies when the service starts
+static std::size_t callback_threads() noexcept;            // configured number of callback threads
 ```
 
-`shutdown()` stops the shared service and joins its thread, abandoning requests still in flight without calling their callbacks, so a hung request cannot stall program exit; the next callback-based `async_*()` call starts the service again. It runs automatically at normal program exit, so an in-flight request can never use the service while the statics it runs on are being destroyed. Because it joins the service thread, never call it from a response callback or from a signal handler. The awaitable methods below run on the caller's executor and are unaffected by it.
+`shutdown()` stops the shared service and joins its threads, so a hung request cannot stall program exit. It abandons the requests still in flight and any callbacks queued on the callback threads that have not run yet. Their callbacks are never called, even if a later request restarts the service, so an abandoned request never posts to the executor it was given. A callback already posted to a caller's executor still runs there. The next callback-based `async_*()` call starts the service again. `shutdown()` runs automatically at normal program exit, so an in-flight request can never use the service while the statics it runs on are being destroyed. Because it joins the service threads, never call it from a response callback or from a signal handler. The awaitable methods below run on the caller's executor and are unaffected by it.
 
 **Asynchronous Awaitable Methods (C++20 Coroutines):**
 ```cpp
