@@ -26,6 +26,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(BUILD_SLICK_NET_TESTS "Build tests" ${PROJECT_IS_TOP_LEVEL})
 option(BUILD_SLICK_NET_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
+option(BUILD_SLICK_NET_BENCH "Build benchmarks (measure in Release)" OFF)
 option(SLICK_NET_ENABLE_SOURCE_LOCATION "Enable LOG_* macro source-location capture" ON)
 # OFF by default: -march=native bakes the build machine's ISA into Release artifacts, so they
 # fault on any older CPU. Opt in only when the binary runs on the machine that built it.
@@ -184,6 +185,13 @@ if(BUILD_SLICK_NET_EXAMPLES)
     add_subdirectory(examples)
 else()
     message(STATUS "Skipping slick::net examples")
+endif()
+
+if(BUILD_SLICK_NET_BENCH)
+    message(STATUS "Building slick::net benchmarks")
+    add_subdirectory(bench)
+else()
+    message(STATUS "Skipping slick::net benchmarks")
 endif()
 
 # Installation rules

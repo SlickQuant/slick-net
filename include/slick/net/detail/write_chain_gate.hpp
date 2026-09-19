@@ -34,12 +34,19 @@ namespace slick::net::detail {
  *
  * The trade is one fence per published record (an `mfence` on x86) against the post it replaces -
  * an allocation, a handler queued on the executor, and often a syscall to wake the consumer
- * thread. What is established is the coalescing itself: the wakeup counter asserts one post per
- * burst rather than one per send. Whether that is a net throughput win is NOT measured, and it
- * need not be - the fence is paid by every send, including the ones whose posts it never saves,
- * so a workload whose sends rarely overlap a running chain adds fences and removes nothing.
- * Benchmark both paths on the target hardware before claiming a throughput win. The fence is not
- * on the consumer's per-record path: it runs once per chain, when the queue has already run dry.
+ * thread. bench/write_chain_bench.cpp A/Bs this path against the unconditional-post one it
+ * replaced. On a 16-thread x86-64 desktop, MSVC Release, one producer, per send:
+ *
+ *   sends into a running chain (gap 0-2us)    1850 ns -> 43 ns, and one post instead of N
+ *   sends 5-10us apart, partly coalesced      0.6-1.4 us saved per send
+ *   sends 50us apart, never overlapping       no difference outside run-to-run noise
+ *
+ * So the fence did not show up as a cost anywhere: where it saves no post it is lost in the send
+ * interval, and where sends overlap it stands in for a post costing ~1.8us. Note what that is -
+ * one machine, and a microbenchmark with no socket in it, so it bounds the wakeup decision rather
+ * than end-to-end WebSocket throughput. Re-run the bench on the target hardware before relying on
+ * the numbers. The fence is not on the consumer's per-record path: it runs once per chain, when
+ * the queue has already run dry.
  */
 class write_chain_gate {
 public:

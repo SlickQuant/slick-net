@@ -538,6 +538,9 @@ the frames, in the order the queue accepted them.
 Only the first send of a burst wakes the service thread. That send starts a *write chain* which
 keeps writing until the queue runs dry, so every send landing while the chain runs rides it instead
 of posting a wakeup of its own — a burst of a thousand messages costs one wakeup, not a thousand.
+The A/B against the unconditional-post path it replaced is in [`bench/`](bench/README.md), along
+with what it measures and what it leaves out; run it on your own hardware before assuming the
+numbers transfer.
 Sends made while the connection is still `CONNECTING` queue the same way and flush, in order, once
 the handshake completes.
 
