@@ -9,9 +9,10 @@ namespace slick::net::detail {
  * @brief Wakeup coalescing for a single drain chain fed by many producers.
  *
  * Producers publish records into a lock-free queue; one chain on the consumer thread drains it and
- * ends when the queue runs dry. Without coalescing every producer has to post a wakeup, which costs
- * far more than the record it carries. This gate lets only the producer that finds no chain running
- * post one - every producer behind it relies on the running chain to drain what it published.
+ * ends when the queue runs dry. Without coalescing every producer has to post a wakeup of its own,
+ * so a burst of N records costs N posts. This gate lets only the producer that finds no chain
+ * running post one - every producer behind it relies on the running chain to drain what it
+ * published.
  *
  * Making that reliance safe needs the two sides to agree on a single question: did the chain end
  * before or after this record was published? Each side answers it by storing, then loading:
@@ -31,10 +32,14 @@ namespace slick::net::detail {
  * record and the chain keeps running, or the producer sees the ended chain and starts a new one.
  * Both may happen - the CAS then decides which, and the loser leaves the chain to the winner.
  *
- * Cost is one fence per published record (an `mfence` on x86) in place of the wakeup it replaces,
- * which is an allocation, a handler queued on the executor, and often a syscall to wake the
- * consumer thread. The fence is not on the consumer's per-record path: it runs once per chain,
- * when the queue has already run dry.
+ * The trade is one fence per published record (an `mfence` on x86) against the post it replaces -
+ * an allocation, a handler queued on the executor, and often a syscall to wake the consumer
+ * thread. What is established is the coalescing itself: the wakeup counter asserts one post per
+ * burst rather than one per send. Whether that is a net throughput win is NOT measured, and it
+ * need not be - the fence is paid by every send, including the ones whose posts it never saves,
+ * so a workload whose sends rarely overlap a running chain adds fences and removes nothing.
+ * Benchmark both paths on the target hardware before claiming a throughput win. The fence is not
+ * on the consumer's per-record path: it runs once per chain, when the queue has already run dry.
  */
 class write_chain_gate {
 public:
