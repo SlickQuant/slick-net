@@ -11,9 +11,17 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <charconv>
+#include <format>
+#include <future>
+#include <iostream>
+#include <string_view>
 
 #include <slick/net/websocket.hpp>
 #include <slick/net/detail/websocket_impl.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/use_awaitable.hpp>
 
 namespace slick::net {
 
@@ -2445,6 +2453,301 @@ TEST_F(WebsocketTest, Reconnect_SameObject_CloseCancelsPendingDeferredOpen) {
     connected.wait_for(std::chrono::milliseconds(15000));
     EXPECT_TRUE(connected.is_triggered()) << "open() after cancelled deferred open never connected";
     ws.close();
+}
+
+// ======================== Write Wakeup Coalescing Tests ========================
+
+namespace {
+
+// Loopback plain WebSocket server that echoes every message back. With hold_handshakes it answers no
+// upgrade request until release_handshakes(), keeping its clients CONNECTING.
+class local_websocket_echo_server {
+public:
+    explicit local_websocket_echo_server(bool hold_handshakes = false)
+        : acceptor_(ioc_, {boost::asio::ip::address_v4::loopback(), 0})
+        , port_(acceptor_.local_endpoint().port())
+        , handshake_gate_(ioc_, boost::asio::steady_timer::time_point::max())
+        , hold_handshakes_(hold_handshakes) {
+        boost::asio::co_spawn(ioc_, accept_loop(), boost::asio::detached);
+        thread_ = std::thread([this] { ioc_.run(); });
+    }
+
+    ~local_websocket_echo_server() {
+        ioc_.stop();
+        thread_.join();
+    }
+
+    std::string url() const { return std::format("ws://127.0.0.1:{}/", port_); }
+    // Upgrade requests read so far, held ones included
+    int upgrade_requests() const noexcept { return upgrade_requests_.load(std::memory_order_acquire); }
+
+    void release_handshakes() {
+        boost::asio::post(ioc_, [this] {
+            hold_handshakes_ = false;
+            handshake_gate_.cancel();
+        });
+    }
+
+private:
+    boost::asio::awaitable<void> accept_loop() {
+        for (;;) {
+            auto [ec, socket] = co_await acceptor_.async_accept(boost::asio::as_tuple(boost::asio::use_awaitable));
+            if (ec) {
+                co_return;
+            }
+            boost::asio::co_spawn(ioc_, serve(std::move(socket)), boost::asio::detached);
+        }
+    }
+
+    boost::asio::awaitable<void> serve(boost::asio::ip::tcp::socket socket) {
+        const auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
+        boost::beast::flat_buffer buffer;
+        boost::beast::http::request<boost::beast::http::string_body> request;
+        if (auto [ec, n] = co_await boost::beast::http::async_read(socket, buffer, request, token); ec) {
+            co_return;
+        }
+        upgrade_requests_.fetch_add(1, std::memory_order_release);
+        if (hold_handshakes_) {
+            co_await handshake_gate_.async_wait(token);
+        }
+
+        boost::beast::websocket::stream<boost::asio::ip::tcp::socket> ws(std::move(socket));
+        if (auto [ec] = co_await ws.async_accept(request, token); ec) {
+            co_return;
+        }
+        for (;;) {
+            buffer.clear();
+            if (auto [ec, n] = co_await ws.async_read(buffer, token); ec) {
+                co_return;
+            }
+            ws.text(ws.got_text());
+            if (auto [ec, n] = co_await ws.async_write(buffer.data(), token); ec) {
+                co_return;
+            }
+        }
+    }
+
+    boost::asio::io_context ioc_;
+    boost::asio::ip::tcp::acceptor acceptor_;
+    uint16_t port_;
+    boost::asio::steady_timer handshake_gate_;
+    bool hold_handshakes_;  // server thread only once running
+    std::atomic<int> upgrade_requests_{0};
+    std::thread thread_;
+};
+
+// Occupies the websocket service thread from construction until destruction
+class service_thread_blocker {
+public:
+    service_thread_blocker() {
+        auto entered = std::make_shared<std::promise<void>>();
+        auto entered_future = entered->get_future();
+        boost::asio::post(detail::websocket_ioc(), [entered, release = release_future_]() {
+            entered->set_value();
+            release.wait();
+        });
+        blocked_ = entered_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    }
+
+    ~service_thread_blocker() {
+        release_.set_value();
+    }
+
+    bool blocked() const noexcept { return blocked_; }
+
+private:
+    std::promise<void> release_;
+    std::shared_future<void> release_future_{release_.get_future().share()};
+    bool blocked_ = false;
+};
+
+std::string sequenced_message(std::size_t producer, std::size_t sequence) {
+    return std::format("{}:{}", producer, sequence);
+}
+
+// Echoes of sequenced_message()s, checked for per-producer order as they arrive on the service thread
+struct echo_order_checker {
+    explicit echo_order_checker(std::size_t producers) : next_sequence(producers, 0) {}
+
+    void on_echo(const char* data, std::size_t len) {
+        std::string_view msg(data, len);
+        std::size_t producer = 0;
+        std::size_t sequence = 0;
+        const auto colon = msg.find(':');
+        const bool parsed = colon != std::string_view::npos &&
+            std::from_chars(msg.data(), msg.data() + colon, producer).ec == std::errc{} &&
+            std::from_chars(msg.data() + colon + 1, msg.data() + msg.size(), sequence).ec == std::errc{};
+        if (!parsed || producer >= next_sequence.size() || sequence != next_sequence[producer]) {
+            out_of_order.store(true, std::memory_order_release);
+        }
+        else {
+            ++next_sequence[producer];
+        }
+        received.store(received.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    }
+
+    std::vector<std::size_t> next_sequence;  // service thread only
+    std::atomic<std::size_t> received{0};
+    std::atomic_bool out_of_order{false};
+};
+
+} // namespace
+
+// Sends that land while the first one's wakeup is still queued post none of their own, and the one
+// write chain drains them all in order.
+TEST_F(WebsocketTest, SendsBehindScheduledWriteChainPostOneWakeup) {
+    local_websocket_echo_server server;
+    echo_order_checker echoes(1);
+    std::atomic_bool connected{false};
+    Websocket<> ws(
+        server.url(),
+        [&]() { connected.store(true, std::memory_order_release); },
+        []() {},
+        [&](const char* data, std::size_t len) { echoes.on_echo(data, len); },
+        [](std::string&&) {}
+    );
+    ws.open();
+    ASSERT_TRUE(wait_for_condition([&]() { return connected.load(std::memory_order_acquire); }));
+
+    constexpr std::size_t kMessages = 1000;
+    const auto wakeups_before = detail::websocket_write_wakeups();
+    {
+        service_thread_blocker blocker;
+        EXPECT_TRUE(blocker.blocked());
+        for (std::size_t i = 0; i < kMessages; ++i) {
+            const auto msg = sequenced_message(0, i);
+            ws.send(msg.data(), msg.size());
+        }
+    }
+
+    EXPECT_TRUE(wait_for_condition([&]() { return echoes.received.load(std::memory_order_acquire) == kMessages; }))
+        << "echoed " << echoes.received.load(std::memory_order_acquire) << " of " << kMessages;
+    EXPECT_FALSE(echoes.out_of_order.load(std::memory_order_acquire));
+    EXPECT_EQ(detail::websocket_write_wakeups() - wakeups_before, 1u);
+
+    ws.close();
+    EXPECT_TRUE(wait_for_condition([&]() { return ws.status() == Websocket<>::Status::DISCONNECTED; }));
+}
+
+// Sends made while CONNECTING park one write chain, which flushes them in order once connected.
+TEST_F(WebsocketTest, SendsWhileConnectingPostOneWakeupAndFlushInOrder) {
+    local_websocket_echo_server server(/*hold_handshakes=*/true);
+    echo_order_checker echoes(1);
+    Websocket<> ws(
+        server.url(),
+        []() {},
+        []() {},
+        [&](const char* data, std::size_t len) { echoes.on_echo(data, len); },
+        [](std::string&&) {}
+    );
+    ws.open();
+    ASSERT_TRUE(wait_for_condition([&]() { return server.upgrade_requests() == 1; }));
+
+    constexpr std::size_t kMessages = 100;
+    const auto wakeups_before = detail::websocket_write_wakeups();
+    for (std::size_t i = 0; i < kMessages; ++i) {
+        const auto msg = sequenced_message(0, i);
+        ws.send(msg.data(), msg.size());
+    }
+    EXPECT_EQ(ws.status(), Websocket<>::Status::CONNECTING);
+    server.release_handshakes();
+
+    EXPECT_TRUE(wait_for_condition([&]() { return echoes.received.load(std::memory_order_acquire) == kMessages; }))
+        << "echoed " << echoes.received.load(std::memory_order_acquire) << " of " << kMessages;
+    EXPECT_FALSE(echoes.out_of_order.load(std::memory_order_acquire));
+    EXPECT_EQ(detail::websocket_write_wakeups() - wakeups_before, 1u);
+
+    ws.close();
+    EXPECT_TRUE(wait_for_condition([&]() { return ws.status() == Websocket<>::Status::DISCONNECTED; }));
+}
+
+// A send's wakeup queued behind the handshake completion runs after the session reached CONNECTED.
+// Reaching CONNECTED must not start a write chain of its own for that send, or two chains would
+// write the stream at once.
+TEST_F(WebsocketTest, SendQueuedBehindHandshakeCompletionStartsOneWriteChain) {
+    local_websocket_echo_server server(/*hold_handshakes=*/true);
+    echo_order_checker echoes(1);
+    Websocket<> ws(
+        server.url(),
+        []() {},
+        []() {},
+        [&](const char* data, std::size_t len) { echoes.on_echo(data, len); },
+        [](std::string&&) {}
+    );
+    ws.open();
+    ASSERT_TRUE(wait_for_condition([&]() { return server.upgrade_requests() == 1; }));
+
+    constexpr std::size_t kMessages = 100;
+    const auto wakeups_before = detail::websocket_write_wakeups();
+    {
+        service_thread_blocker blocker;
+        EXPECT_TRUE(blocker.blocked());
+        server.release_handshakes();
+        // Let the handshake response reach the client first, so its completion is queued ahead of the wakeup
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        for (std::size_t i = 0; i < kMessages; ++i) {
+            const auto msg = sequenced_message(0, i);
+            ws.send(msg.data(), msg.size());
+        }
+    }
+
+    EXPECT_TRUE(wait_for_condition([&]() { return echoes.received.load(std::memory_order_acquire) == kMessages; }))
+        << "echoed " << echoes.received.load(std::memory_order_acquire) << " of " << kMessages;
+    EXPECT_FALSE(echoes.out_of_order.load(std::memory_order_acquire));
+    EXPECT_EQ(detail::websocket_write_wakeups() - wakeups_before, 1u);
+
+    ws.close();
+    EXPECT_TRUE(wait_for_condition([&]() { return ws.status() == Websocket<>::Status::DISCONNECTED; }));
+}
+
+// Producers racing the write chain as it drains the queue and ends: every send either finds the chain
+// still running or restarts it, so no message is stranded.
+TEST_F(WebsocketTest, ConcurrentSendsRacingWriteChainEndDeliverEveryMessageInOrder) {
+    local_websocket_echo_server server;
+    constexpr std::size_t kProducers = 4;
+    constexpr std::size_t kMessagesPerProducer = 5000;
+    constexpr std::size_t kMessages = kProducers * kMessagesPerProducer;
+    echo_order_checker echoes(kProducers);
+    std::atomic_bool connected{false};
+    Websocket<> ws(
+        server.url(),
+        [&]() { connected.store(true, std::memory_order_release); },
+        []() {},
+        [&](const char* data, std::size_t len) { echoes.on_echo(data, len); },
+        [](std::string&&) {}
+    );
+    ws.open();
+    ASSERT_TRUE(wait_for_condition([&]() { return connected.load(std::memory_order_acquire); }));
+
+    const auto wakeups_before = detail::websocket_write_wakeups();
+    std::vector<std::thread> producers;
+    for (std::size_t p = 0; p < kProducers; ++p) {
+        producers.emplace_back([&ws, p]() {
+            for (std::size_t i = 0; i < kMessagesPerProducer; ++i) {
+                const auto msg = sequenced_message(p, i);
+                ws.send(msg.data(), msg.size());
+                // Pause now and then so the chain drains the queue and ends between bursts
+                if ((i & 15) == 15) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+    }
+    for (auto& producer : producers) {
+        producer.join();
+    }
+
+    EXPECT_TRUE(wait_for_condition([&]() { return echoes.received.load(std::memory_order_acquire) == kMessages; },
+                                   std::chrono::milliseconds(20000)))
+        << "echoed " << echoes.received.load(std::memory_order_acquire) << " of " << kMessages;
+    EXPECT_FALSE(echoes.out_of_order.load(std::memory_order_acquire));
+    const auto wakeups = detail::websocket_write_wakeups() - wakeups_before;
+    EXPECT_GE(wakeups, 1u);
+    EXPECT_LE(wakeups, kMessages);
+    std::cout << "write wakeups for " << kMessages << " sends: " << wakeups << std::endl;
+
+    ws.close();
+    EXPECT_TRUE(wait_for_condition([&]() { return ws.status() == Websocket<>::Status::DISCONNECTED; }));
 }
 
 } // namespace slick::net

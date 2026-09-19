@@ -519,7 +519,7 @@ Websocket<BufferT>(
 - `void send_binary_data(const char* buffer, size_t len, bool suppress_log = false)` - Send binary data through the WebSocket
 - `Status status() const` - Get current connection status
 - `void detach()` - Suppress callbacks from this object's session (used internally during teardown/reconnect)
-- `static void shutdown()` - Stop the shared service thread and join it; the next `open()` starts it again. Safe to call from a callback: the service thread cannot join itself, so from one it only requests the stop and returns, and the join happens at the next `shutdown()` from another thread, at the next `open()`, or at program exit
+- `static void shutdown()` - Stop the shared service thread and join it; the next `open()` starts it again. Safe to call from a callback: the service thread cannot join itself, so from one it only requests the stop and returns, and the join happens at the next `shutdown()` from another thread, at the next `open()`, or at program exit. Also safe to call concurrently, and concurrently with `open()`: the thread is owned by one caller at a time, so exactly one of them joins it and the rest return once that join is done
 - `static void set_busy_poll(bool enable)` - Switch the service thread between blocking and busy polling (see [Busy Polling](#busy-polling) below)
 - `static bool busy_poll()` - Whether the service thread busy-polls
 
@@ -528,6 +528,18 @@ Websocket<BufferT>(
 - `CONNECTED` - Connected and ready
 - `DISCONNECTING` - Disconnection in progress
 - `DISCONNECTED` - Disconnected
+
+### Sending
+
+`send()` is lock-free and safe to call from any thread, including from inside the WebSocket's own
+callbacks. It copies the payload into the write queue and returns; the shared service thread writes
+the frames, in the order the queue accepted them.
+
+Only the first send of a burst wakes the service thread. That send starts a *write chain* which
+keeps writing until the queue runs dry, so every send landing while the chain runs rides it instead
+of posting a wakeup of its own — a burst of a thousand messages costs one wakeup, not a thousand.
+Sends made while the connection is still `CONNECTING` queue the same way and flush, in order, once
+the handshake completes.
 
 ### Busy Polling
 

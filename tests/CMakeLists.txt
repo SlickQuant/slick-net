@@ -21,6 +21,9 @@ include(GoogleTest)
 
 add_executable(websocket_tests websocket_tests.cpp)
 target_link_libraries(websocket_tests PRIVATE slick::net GTest::gtest_main)
+if (MSVC)
+    target_compile_options(websocket_tests PRIVATE "/bigobj")
+endif()
 
 add_executable(websocket_service_tests websocket_service_tests.cpp)
 target_link_libraries(websocket_service_tests PRIVATE slick::net GTest::gtest_main)
@@ -39,6 +42,9 @@ target_link_libraries(logging_tests PRIVATE slick::net GTest::gtest_main)
 
 add_executable(signal_tests signal_tests.cpp)
 target_link_libraries(signal_tests PRIVATE slick::net GTest::gtest_main)
+
+add_executable(write_chain_gate_tests write_chain_gate_tests.cpp)
+target_link_libraries(write_chain_gate_tests PRIVATE slick::net GTest::gtest_main)
 
 add_executable(slick_buffer_tests slick_buffer_websocket_tests.cpp)
 target_link_libraries(slick_buffer_tests PRIVATE slick::net GTest::gtest_main)
@@ -61,6 +67,8 @@ gtest_discover_tests(tls_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROP
 gtest_discover_tests(logging_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
 gtest_discover_tests(signal_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
 gtest_discover_tests(slick_buffer_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 120)
+# The write-chain race tests spin for a fixed budget of their own, so they need more than the rest
+gtest_discover_tests(write_chain_gate_tests DISCOVERY_TIMEOUT 60 DISCOVERY_MODE PRE_TEST PROPERTIES TIMEOUT 180)
 
 # Set test properties
 set_target_properties(websocket_tests PROPERTIES
@@ -88,5 +96,9 @@ set_target_properties(signal_tests PROPERTIES
 )
 
 set_target_properties(slick_buffer_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
+)
+
+set_target_properties(write_chain_gate_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
 )

@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <boost/asio/post.hpp>
 #include <slick/net/websocket.hpp>
@@ -248,10 +249,159 @@ TEST_F(WebsocketServiceTest, ShutdownFromCallbackDoesNotSelfJoin) {
 
     // Joins the thread the callback's shutdown() could only ask to stop, the way the terminator does at
     // program exit. It also makes the restart below deterministic: the service can only start again
-    // once the previous thread has cleared init_service_thread_ on its way out.
+    // once that thread has been joined and the object is free to be reused.
     Websocket<>::shutdown();
 
     // Reusing the thread object move-assigns a new thread onto it
+    ASSERT_TRUE(run_failed_connection());
+    EXPECT_TRUE(Websocket<>::is_running());
+}
+
+// Regression: shutdown() inspected and joined the shared std::thread with nothing serializing the
+// ownership of it, so two external calls both read get_id(), both found it joinable and both joined it -
+// undefined behaviour that surfaces as a std::system_error thrown by the loser, or as a crash. Ownership
+// now moves through an atomic state machine, so exactly one call joins and the others return once it has.
+TEST_F(WebsocketServiceTest, ConcurrentShutdownsJoinTheServiceThreadOnce) {
+    constexpr int kThreads = 8;
+    constexpr int kRounds = 10;
+    for (int round = 0; round < kRounds; ++round) {
+        ASSERT_TRUE(run_failed_connection()) << "round " << round;
+        ASSERT_TRUE(Websocket<>::is_running()) << "round " << round;
+
+        std::atomic<int> ready{0};
+        std::atomic_bool go{false};
+        std::atomic<int> threw{0};
+        std::vector<std::thread> shutdowns;
+        shutdowns.reserve(kThreads);
+        for (int i = 0; i < kThreads; ++i) {
+            shutdowns.emplace_back([&] {
+                ready.fetch_add(1, std::memory_order_acq_rel);
+                while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                try {
+                    Websocket<>::shutdown();
+                }
+                catch (const std::exception&) {
+                    threw.fetch_add(1, std::memory_order_acq_rel);
+                }
+            });
+        }
+        // Release them together so their joins overlap
+        while (ready.load(std::memory_order_acquire) < kThreads) {
+            std::this_thread::yield();
+        }
+        go.store(true, std::memory_order_release);
+        for (auto& thread : shutdowns) {
+            thread.join();
+        }
+
+        EXPECT_EQ(threw.load(std::memory_order_acquire), 0)
+            << "a concurrent shutdown() threw, round " << round;
+        EXPECT_FALSE(Websocket<>::is_running()) << "round " << round;
+    }
+}
+
+// The same std::thread is move-assigned by the open() that starts the service and joined by shutdown(),
+// so a start racing a stop must not touch it while the other one owns it. Whichever runs last decides
+// whether the service is left up, and either way the object stays reusable.
+TEST_F(WebsocketServiceTest, StartRacingShutdownKeepsTheThreadObjectReusable) {
+    constexpr int kRounds = 25;
+    std::atomic<int> threw{0};
+    for (int round = 0; round < kRounds; ++round) {
+        detail::start_websocket_service();
+        ASSERT_TRUE(Websocket<>::is_running()) << "round " << round;
+
+        std::atomic<int> ready{0};
+        std::atomic_bool go{false};
+        auto race = [&](void (*action)()) {
+            return std::thread([&, action] {
+                ready.fetch_add(1, std::memory_order_acq_rel);
+                while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                try {
+                    action();
+                }
+                catch (const std::exception&) {
+                    threw.fetch_add(1, std::memory_order_acq_rel);
+                }
+            });
+        };
+        auto starter = race([] { detail::start_websocket_service(); });
+        auto stopper = race([] { Websocket<>::shutdown(); });
+        while (ready.load(std::memory_order_acquire) < 2) {
+            std::this_thread::yield();
+        }
+        go.store(true, std::memory_order_release);
+        starter.join();
+        stopper.join();
+
+        // A start that came last left the service up again; either way this settles it and joins
+        Websocket<>::shutdown();
+        EXPECT_FALSE(Websocket<>::is_running()) << "round " << round;
+    }
+    EXPECT_EQ(threw.load(std::memory_order_acquire), 0) << "a racing start or shutdown() threw";
+
+    // The object survived every race intact, so it can be move-assigned a new thread
+    ASSERT_TRUE(run_failed_connection());
+    EXPECT_TRUE(Websocket<>::is_running());
+}
+
+// A shutdown() from a callback runs on the service thread while an external shutdown() is joining that
+// very thread. The callback can only request the stop and return: waiting for the owner of the join
+// there would deadlock, since that owner is waiting for this thread to finish the callback.
+TEST_F(WebsocketServiceTest, ShutdownFromCallbackRacingExternalShutdownDoesNotDeadlock) {
+    std::atomic_bool in_callback{false};
+    std::atomic_bool callback_done{false};
+    std::atomic<int> threw{0};
+    {
+        // Nothing listens on port 1, so the connect fails and onError runs on the service thread
+        Websocket<> ws(
+            "ws://127.0.0.1:1/",
+            []() {},
+            []() {},
+            [](const char*, std::size_t) {},
+            [&](std::string&&) {
+                in_callback.store(true, std::memory_order_release);
+                try {
+                    Websocket<>::shutdown();
+                }
+                catch (const std::exception&) {
+                    threw.fetch_add(1, std::memory_order_acq_rel);
+                }
+                callback_done.store(true, std::memory_order_release);
+            });
+        ws.open();
+
+        // Starts its shutdown() once the callback is on the service thread, so its join overlaps the
+        // shutdown() the callback makes from inside that thread
+        auto external = std::async(std::launch::async, [&] {
+            const auto deadline = std::chrono::steady_clock::now() + 10s;
+            while (!in_callback.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+            try {
+                Websocket<>::shutdown();
+            }
+            catch (const std::exception&) {
+                threw.fetch_add(1, std::memory_order_acq_rel);
+            }
+        });
+
+        ASSERT_EQ(external.wait_for(30s), std::future_status::ready)
+            << "the external shutdown() never returned";
+        external.get();
+        ASSERT_TRUE(in_callback.load(std::memory_order_acquire)) << "the error callback never ran";
+        ASSERT_TRUE(callback_done.load(std::memory_order_acquire))
+            << "the shutdown() from the callback never returned";
+    }
+
+    EXPECT_EQ(threw.load(std::memory_order_acquire), 0) << "a racing shutdown() threw";
+    EXPECT_FALSE(Websocket<>::is_running());
+
+    // The external shutdown() joined the thread, so the next open() can reuse the object
     ASSERT_TRUE(run_failed_connection());
     EXPECT_TRUE(Websocket<>::is_running());
 }

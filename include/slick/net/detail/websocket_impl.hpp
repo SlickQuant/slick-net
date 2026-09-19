@@ -4,6 +4,7 @@
 #include <slick/net/logging.hpp>
 #include <slick/net/tls.hpp>
 #include <slick/net/detail/url.hpp>
+#include <slick/net/detail/write_chain_gate.hpp>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -48,6 +49,10 @@ void set_websocket_busy_poll(bool enable) noexcept;
 bool websocket_busy_poll() noexcept;
 // Turns of the service thread's loop: one per poll() while busy polling, one per stop() otherwise
 std::uint64_t websocket_service_loop_iterations() noexcept;
+// Wakeups send() has posted to start a write chain, counted on the service thread as each one runs.
+// A send() that finds a chain already scheduled posts none.
+void count_websocket_write_wakeup() noexcept;
+std::uint64_t websocket_write_wakeups() noexcept;
 
 struct websocket_url_parts {
     std::string host;
@@ -138,6 +143,7 @@ private:
     asio::awaitable<void> do_ws_session_ssl();
     asio::awaitable<void> do_ws_session_plain();
     void do_write();
+    std::pair<char*, uint32_t> next_queued_write();
     void maybe_start_queued_write();
     void on_write(beast::error_code ec, std::size_t bytes_transferred);
     void on_read(beast::error_code ec, std::size_t bytes_transferred);
@@ -178,8 +184,13 @@ private:
     slick::queue<char> w_buffer_;
     std::shared_ptr<BufferT> r_buffer_;
     uint64_t w_cursor_{0};
-    std::atomic_bool in_writting_{false};
+    // Owned while a write chain exists - a posted wakeup, a frame being written, or a chain parked
+    // until CONNECTED - so a send() that finds it owned posts no wakeup of its own.
+    detail::write_chain_gate write_chain_;
     std::atomic_bool detached_{false};
+    // The write chain stopped before CONNECTED and waits for maybe_start_queued_write().
+    // Service thread only.
+    bool write_parked_{false};
 
     enum class ReleaseState : uint8_t { kActive, kCallbackSet, kReleased };
     std::atomic<ReleaseState> release_state_{ ReleaseState::kActive };
@@ -444,12 +455,13 @@ asio::awaitable<void> Websocket<BufferT>::Impl::do_ws_session_plain() {
 template<typename BufferT>
 void Websocket<BufferT>::Impl::do_write() {
     if (status_.load(std::memory_order_relaxed) != Status::CONNECTED) [[unlikely]] {
-        // Keep in_writting_ set while CONNECTING so queued sends are flushed
-        // once the handshake reaches CONNECTED, without spinning the service thread.
+        // Park with the write chain still owned, so sends queued while CONNECTING post no wakeups;
+        // maybe_start_queued_write() resumes the chain once the handshake reaches CONNECTED.
+        write_parked_ = true;
         return;
     }
-    auto [msg, len] = w_buffer_.read(w_cursor_);
-    if (msg && len) {
+    auto [msg, len] = next_queued_write();
+    if (msg) {
         bool is_binary = msg[0];
         bool suppress_log = msg[1];
         msg += 2;
@@ -469,19 +481,37 @@ void Websocket<BufferT>::Impl::do_write() {
                 beast::bind_front_handler(&Websocket<BufferT>::Impl::on_write, this->shared_from_this()));
         }
     }
-    else {
-        in_writting_.store(false, std::memory_order_release);
+}
+
+// The next record for the write chain, or {nullptr, 0} once the queue is drained and the chain has ended.
+template<typename BufferT>
+std::pair<char*, uint32_t> Websocket<BufferT>::Impl::next_queued_write() {
+    auto record = w_buffer_.read(w_cursor_);
+    if (record.first) {
+        return record;
     }
+    // The queue ran dry, so end the chain and look once more. Probing off a copy of the cursor keeps
+    // w_cursor_ on this record for the wakeup of a send() that claims the gate ahead of this probe.
+    auto cursor = w_cursor_;
+    if (!write_chain_.ended_or_reclaimed([&]() {
+            record = w_buffer_.read(cursor);
+            return record.first != nullptr;
+        })) {
+        return {nullptr, 0};
+    }
+    w_cursor_ = cursor;
+    return record;
 }
 
 template<typename BufferT>
 void Websocket<BufferT>::Impl::maybe_start_queued_write() {
-    if (in_writting_.load(std::memory_order_acquire)) {
+    // Only a parked chain is resumed here. The gate may also be owned by a send() whose wakeup has not
+    // run yet; that wakeup starts the chain itself, and posting another would start a second one.
+    if (write_parked_) {
+        write_parked_ = false;
         auto executor = use_ssl_ ? wss_->get_executor() : ws_->get_executor();
         asio::post(executor, [self = this->shared_from_this()]() {
-            if (self->in_writting_.load(std::memory_order_acquire)) {
-                self->do_write();
-            }
+            self->do_write();
         });
     }
 }
@@ -502,7 +532,8 @@ void Websocket<BufferT>::Impl::on_write(beast::error_code ec, std::size_t bytes_
             }
             close();
         }
-        in_writting_.store(false, std::memory_order_release);
+        // The connection is going down, so end the chain without draining; a later send() starts a new one
+        write_chain_.abandon();
         return;
     }
     do_write();
@@ -633,13 +664,16 @@ void Websocket<BufferT>::Impl::send(const char* buffer, size_t len, bool is_bina
     memcpy(w_buffer_[index + 2], buffer, len);
     w_buffer_.publish(index, l);
 
-    auto executor = use_ssl_ ? wss_->get_executor() : ws_->get_executor();
-    asio::post(executor, [self = this->shared_from_this()]() {
-        bool expected = false;
-        if (self->in_writting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    // Coalesce wakeups: only the send that finds no write chain posts one, and the chain drains every
+    // record queued behind it. write_chain_gate is what makes leaving the record to a running chain
+    // safe against that chain ending on the record's heels - see the protocol note on the class.
+    if (write_chain_.claim_after_publish()) {
+        auto executor = use_ssl_ ? wss_->get_executor() : ws_->get_executor();
+        asio::post(executor, [self = this->shared_from_this()]() {
+            detail::count_websocket_write_wakeup();
             self->do_write();
-        }
-    });
+        });
+    }
 }
 
 // ─── Websocket<BufferT> outer class method bodies ────────────────────────────

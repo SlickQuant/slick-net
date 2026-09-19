@@ -119,6 +119,8 @@ public:
     // on the service thread, which cannot join itself, so from one it only requests the stop and
     // returns - is_running() reads false at once, while the thread finishes after the callback returns
     // and is joined by the next shutdown() from another thread, by the next open(), or at program exit.
+    // Safe to call concurrently, and concurrently with open(): the thread object is owned by one caller
+    // at a time, so a single one of them joins it and the rest return once that join is done.
     // It joins the service thread, so never call it from a signal handler.
     static void shutdown();
 
