@@ -1,30 +1,47 @@
-# [Unreleased]
+# [v4.0.0] - 2026-09-19
 
 ## Security
-- TLS certificate verification is now enforced for `https://` and `wss://`. `Http` and `HttpStream` previously used `verify_none`, and `Websocket` never enabled peer verification or loaded trust roots, leaving all TLS connections open to man-in-the-middle interception. Handshakes now verify the certificate chain against the system trust roots and require the certificate to match the URL host name or IP address.
+- TLS certificate verification is now enforced for `https://` and `wss://`. `Http` and `HttpStream` used `verify_none` and `Websocket` never verified at all, leaving every TLS connection open to man-in-the-middle interception. Handshakes now verify the chain against the system trust roots and require the certificate to match the URL host name or IP address.
+
+## Breaking
+- **TLS verification** (above): connections to hosts with a private CA or a self-signed certificate now fail. Trust them explicitly with `tls_context().load_verify_file("corp-root-ca.pem")`.
+- **Signal handlers are no longer installed.** `HttpStream` and `Websocket` installed process-wide `SIGINT`/`SIGTERM` handlers that called `shutdown()` — logging, stopping an `io_context` and joining a thread — from signal context, none of it async-signal-safe, never restored, and `HttpStream` swallowed the application's Ctrl-C. Record the signal in your own handler and call `shutdown()` from normal code (see README); services are still shut down at normal program exit.
+- **`HttpStream` delivers a decoded body.** `onData` previously received raw transfer-coding framing; chunk sizes, extensions and trailers are now decoded by Beast's parser. Remove any de-chunking of your own.
+- **`Http` callbacks no longer run on the I/O thread.** Callbacks of callback-based `async_*()` requests run on a dedicated callback thread (1 by default), so a slow callback cannot hold up another request's I/O. `set_callback_threads(0)` restores the old inline behaviour.
+- **URL schemes are validated.** A scheme other than the pair a client supports (`http`/`https` for `Http` and `HttpStream`, `ws`/`wss` for `Websocket`) was silently treated as plaintext on port 443; it is now rejected with `std::invalid_argument`, as are a port outside 1-65535 and an unterminated `[`.
+- **Dependency bumps**: `slick-stream-buffer-multiplexer` 2.0.0 and `slick-dynamic-buffer` 1.0.2 are now required.
+- Removed `detail::websocket_ssl_context()` in favour of `tls_context()`.
 
 ## Added
-- `slick::net::tls_context()` (`<slick/net/tls.hpp>`): the TLS client context shared by `Http`, `HttpStream` and `Websocket`, created lock-free on first use with `verify_peer` and the system trust roots (`SSL_CERT_FILE`/`SSL_CERT_DIR` when set, otherwise the Windows `ROOT` store or the OS CA bundle plus OpenSSL default paths). Use it to trust a private CA, e.g. `tls_context().load_verify_file(...)`.
-- `tls_tests` — hermetic tests against a local TLS server with runtime-generated certificates covering trusted, untrusted, host name mismatch and IP address mismatch handshakes for all three clients.
-- `signal_tests` — verifies `HttpStream` and `Websocket` leave application `SIGINT`/`SIGTERM` handlers installed and keep running when those signals are raised.
-- `Websocket<>::set_busy_poll(bool)` / `Websocket<>::busy_poll()`: opt-in busy polling for the shared WebSocket service thread, which spins a CPU core on `io_context::poll()` to avoid kernel wake-up latency. Off by default; lock-free and switchable while the service is running.
-- `websocket_service_tests` — hermetic tests measuring the service thread's CPU time, sampled on that thread, to verify an idle service thread does not spin, busy polling does, and switching modes or shutting down while polling leaves a working service.
+- `slick::net::tls_context()` (`<slick/net/tls.hpp>`) — the TLS client context shared by all three clients, created lock-free on first use with `verify_peer` and the system trust roots (`SSL_CERT_FILE`/`SSL_CERT_DIR`, otherwise the Windows `ROOT` store or the OS CA bundle plus OpenSSL defaults). Use it to trust a private CA.
+- `Http::set_callback_threads()` / `Http::callback_threads()`, and `async_*()` overloads taking a `boost::asio::any_io_executor` that post the callback to an executor of yours — a strand, a `thread_pool`, or an `io_context` you run.
+- `HttpStream` constructor taking an executor, so a stream can run off the shared service entirely, plus `HttpStream::set_service_threads()` / `service_threads()` for the shared service (default 1).
+- `Websocket<>::set_busy_poll(bool)` / `busy_poll()` — opt-in busy polling of the shared service thread, spinning a core to avoid kernel wake-up latency. Off by default, lock-free, switchable while running.
+- `SLICK_NET_ENABLE_NATIVE_ARCH` CMake option to opt into `-march=native` for Release builds (off by default; the resulting binaries are not portable).
+- `BUILD_SLICK_NET_BENCH` CMake option and `bench/write_chain_bench` — an A/B of the WebSocket send wakeup paths, with results and caveats in `bench/README.md`. Off by default.
+- Hermetic test suites, all against local servers: `tls_tests` (runtime-generated certificates, all three clients), `signal_tests`, `websocket_service_tests`, `write_chain_gate_tests`, and loopback-server coverage in `http_tests` for concurrent synchronous requests, chunked and SSE streaming, cut-off bodies and idle streams.
 
 ## Changed
-- TLS handshake failures now throw/report `TLS handshake failed (<verification reason>)`.
-- SNI is no longer sent for IP-literal hosts (RFC 6066); IP hosts are verified against the certificate's iPAddress SANs.
-- Removed the internal `detail::websocket_ssl_context()` accessor in favor of `tls_context()`.
-- `slick-net` links `crypt32` on Windows.
-- `<slick/net/detail/websocket_impl.hpp>` no longer includes `<boost/asio/signal_set.hpp>` or `<csignal>`.
+- `Websocket<>::send()` coalesces service-thread wakeups: the first send of a burst starts a write chain that drains the queue, so a burst of a thousand messages costs one wakeup instead of a thousand.
+- Synchronous `Http` methods each run on an `io_context` taken from a lock-free pool of idle contexts, so concurrent callers share no state and never lock.
+- URL parsing accepts `[scheme://]host[:port][/path][?query]` with name, IPv4 or bracketed IPv6 hosts, matches the scheme case-insensitively, defaults to `https`/`wss`, and drops `#fragment`.
+- The `Host` header of `Http` and `HttpStream` requests carries the port only when it is not the connection's default (80, or 443 with TLS).
+- `HttpStream` has no idle timeout — the 2-second read timeout that disconnected quiet streams is gone. `close()` cancels the pending connect, handshake or I/O immediately, `open()` is idempotent while `CONNECTING`/`CONNECTED`, and a stream runs one session at a time so two sessions' callbacks never interleave.
+- SSE parsing is faster, and the parse buffer is cleared between responses.
+- Request headers and bodies are moved rather than copied.
+- TLS handshake failures report `TLS handshake failed (<verification reason>)`; SNI is not sent for IP-literal hosts (RFC 6066), which are verified against the certificate's iPAddress SANs.
+- `slick-net` links `crypt32` on Windows, and `<slick/net/detail/websocket_impl.hpp>` no longer includes `<boost/asio/signal_set.hpp>` or `<csignal>`.
 
 ## Fixed
-- Synchronous `Http::get`/`post`/`put`/`patch`/`del` are now safe to call concurrently. All synchronous calls shared one `io_context` and called `restart()`/`run()` on it without serialization, so a call could return an empty response (`result_code` 0) when another thread's `run()` had just stopped the context, or have its response written through a dangling reference after returning. Each calling thread now uses its own thread-local `io_context` (lock-free, and its reactor, timer and resolver services are reused across calls); a nested synchronous call on a thread already running that context falls back to a temporary one. The five synchronous methods now share one implementation, which also reports non-`std::exception` errors as a 500 response instead of letting them escape `run()`.
-- A synchronous `Http` call no longer blocks until other threads' in-flight synchronous requests finish. Its `run()` drained the shared `io_context` until no work remained, so a fast request waited for any concurrent slow one.
-- `http_tests` — hermetic loopback-server tests: `SyncRequest_NotBlockedByOtherThreadsSlowRequest` checks a synchronous call returns while another thread's slow request is in flight, and `SyncRequests_ConcurrentThreads_EachGetsOwnResponse` runs every synchronous verb from 8 threads and checks each caller receives its own response.
-- An idle `Websocket` service thread no longer spins a CPU core. Once the `io_context` had no outstanding work, `run()` returned immediately and the service loop restarted it forever. The loop now holds an executor work guard so `run()` blocks until `shutdown()`; spinning is available explicitly through `set_busy_poll(true)`.
-- `HttpStream` and `Websocket` no longer install process-wide `SIGINT`/`SIGTERM` handlers. The handlers called `shutdown()` — logging, stopping the `io_context` and joining the service thread — from signal context, none of which is async-signal-safe; they were never restored, and `HttpStream` overwrote the application's handlers and swallowed Ctrl-C. Signal dispositions are now left to the application, which should call `shutdown()` from normal code after its own handler records the signal (see README). Services are still shut down at normal program exit.
-- Release builds no longer lose `NDEBUG`. `CMakeLists.txt` replaced `CMAKE_CXX_FLAGS_RELEASE` (`-O2` on MSVC, `-O3 [-march=native]` elsewhere), discarding CMake's `/DNDEBUG /Ob2` / `-DNDEBUG`. Because `slick::default_queue_traits` follows `NDEBUG`, a Release `slick-net` explicitly instantiated `Websocket` for the `debug_queue_traits` `stream_buffer_multiplexer::producer_buffer`, while a normal Release consumer references the `queue_traits` specialization, causing unresolved symbols against an installed library. The stock Release flags are now kept, and `-march=native` (non-cross-compiling GCC/Clang) is applied to the `slick-net` target only, as a `PRIVATE` Release-only option.
-- `slick_buffer_tests` statically asserts that optimized configurations resolve `default_queue_traits` to `queue_traits`.
+- Synchronous `Http` methods are now safe to call concurrently. They shared one `io_context` and called `restart()`/`run()` on it without serialization, so a call could return an empty response (`result_code` 0) or have its response written through a dangling reference after returning. A fast request also no longer waits for a concurrent slow one.
+- `Websocket<>::shutdown()` is safe from a callback and from several threads at once. Callbacks run on the service thread, so a `shutdown()` from one self-joined — `join()` threw, left the thread object joinable, and the process terminated during static teardown — while concurrent calls from other threads raced to join the same `std::thread`. Ownership of the thread now moves through an atomic state machine: a call from the service thread only requests the stop, and exactly one caller joins.
+- An idle `Websocket` service thread no longer spins a core. With no outstanding work `run()` returned immediately and the loop restarted it forever; an executor work guard now keeps it blocked until `shutdown()`.
+- `HttpStream::open()` after `shutdown()` restarts the shared service instead of doing nothing.
+- `Http::shutdown()` drops the callbacks of the requests it abandons even if a later request restarts the service, so a resumed request can never post into an executor whose context the caller has already destroyed.
+- Log handlers can be installed, replaced or cleared from any thread while others are logging. The handler and its level getter are now one immutable pair swapped atomically, so a reader never sees a half-installed handler or a new handler paired with the old getter. `clear_log_handler()` does not wait for a handler already running, and a replaced handler is retained for the life of the process, so whatever it captures must outlive the last call that can reach it.
+- HTTPS responses fill in `Response::reason`, which only plain HTTP responses carried.
+- `HttpStream` reports a chunked or `Content-Length` body that ends early through `onError`.
+- Release builds no longer lose `NDEBUG`. `CMakeLists.txt` replaced `CMAKE_CXX_FLAGS_RELEASE` wholesale, discarding CMake's `/DNDEBUG` — and because `slick::default_queue_traits` follows `NDEBUG`, an installed Release `slick-net` failed to link against a normal Release consumer.
 
 # [v3.1.0] - 2026-07-07
 

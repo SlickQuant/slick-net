@@ -105,7 +105,7 @@ include(FetchContent)
 FetchContent_Declare(
     slick-net
     GIT_REPOSITORY https://github.com/SlickQuant/slick-net.git
-    GIT_TAG main
+    GIT_TAG v4.0.0
 )
 FetchContent_MakeAvailable(slick-net)
 target_link_libraries(your_target PRIVATE slick::net)
@@ -337,6 +337,20 @@ Run examples:
 ./examples/http_stream_client_example
 ./examples/http_awaitable_client_example
 ```
+
+## Benchmarks
+
+`bench/` holds A/B benchmarks for the performance-sensitive paths. They are off by default and only
+meaningful in an optimized build:
+
+```bash
+cmake -B build-bench -DCMAKE_BUILD_TYPE=Release -DBUILD_SLICK_NET_BENCH=ON
+cmake --build build-bench -j
+./build-bench/bench/write_chain_bench
+```
+
+See [`bench/README.md`](bench/README.md) for what each one measures, what it leaves out, and the
+numbers from one x86-64 desktop.
 
 ## API Reference
 
