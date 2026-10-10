@@ -115,28 +115,52 @@ if (NOT ENABLE_ASAN)
     # The consumer's initial cache: the toolchain this build used, slick-net pinned to the
     # scratch prefix, and that prefix on the search path - dependencies this build fetched are
     # installed into it too, and are found there when no installed package provides them.
-    string(CONCAT package_consumer_cache
-        "set(slick-net_DIR \"${package_consumer_prefix}/share/slick-net\" CACHE PATH \"\")\n"
-        "set(CMAKE_PREFIX_PATH \"${package_consumer_prefix};$CACHE{CMAKE_PREFIX_PATH}\" CACHE STRING \"\")\n"
-        "set(SLICK_NET_EXPECTED_VERSION \"${PROJECT_VERSION}\" CACHE STRING \"\")\n"
-        "set(SLICK_NET_EXPECTED_slick-stream-buffer-multiplexer_VERSION \"${SLICK_NET_STREAM_BUFFER_MULTIPLEXER_MIN_VERSION}\" CACHE STRING \"\")\n"
-        "set(SLICK_NET_EXPECTED_slick-dynamic-buffer_VERSION \"${SLICK_NET_DYNAMIC_BUFFER_MIN_VERSION}\" CACHE STRING \"\")\n"
-    )
-    set(package_consumer_forwarded CMAKE_TOOLCHAIN_FILE VCPKG_TARGET_TRIPLET
-        CMAKE_OSX_ARCHITECTURES CMAKE_OSX_DEPLOYMENT_TARGET CMAKE_OSX_SYSROOT
-        Boost_USE_STATIC_LIBS OPENSSL_USE_STATIC_LIBS OPENSSL_MSVC_STATIC_RT)
+    #
+    # Regression: values were written as quoted strings, so a path given to this build with
+    # backslashes (-DCMAKE_PREFIX_PATH=D:\a\... on a Windows CI runner) made the script a syntax
+    # error - "Invalid character escape '\a'". Every value is now a bracket argument, which has
+    # no escape sequences, and paths are normalized to forward slashes first.
+    set(package_consumer_cache "")
+    function(package_consumer_cache_set var value)
+        string(APPEND package_consumer_cache "set(${var} [==[${value}]==] CACHE STRING [==[]==])\n")
+        set(package_consumer_cache "${package_consumer_cache}" PARENT_SCOPE)
+    endfunction()
+    function(package_consumer_cache_set_paths var)
+        set(paths "")
+        foreach(path IN LISTS ARGN)
+            cmake_path(SET path NORMALIZE "${path}")
+            list(APPEND paths "${path}")
+        endforeach()
+        package_consumer_cache_set(${var} "${paths}")
+        set(package_consumer_cache "${package_consumer_cache}" PARENT_SCOPE)
+    endfunction()
+
+    package_consumer_cache_set(slick-net_DIR "${package_consumer_prefix}/share/slick-net")
+    package_consumer_cache_set_paths(CMAKE_PREFIX_PATH "${package_consumer_prefix}" $CACHE{CMAKE_PREFIX_PATH})
+    package_consumer_cache_set(SLICK_NET_EXPECTED_VERSION "${PROJECT_VERSION}")
+    package_consumer_cache_set(SLICK_NET_EXPECTED_slick-stream-buffer-multiplexer_VERSION
+        "${SLICK_NET_STREAM_BUFFER_MULTIPLEXER_MIN_VERSION}")
+    package_consumer_cache_set(SLICK_NET_EXPECTED_slick-dynamic-buffer_VERSION
+        "${SLICK_NET_DYNAMIC_BUFFER_MIN_VERSION}")
+
+    set(package_consumer_forwarded_paths CMAKE_TOOLCHAIN_FILE CMAKE_OSX_SYSROOT)
     if (NOT CMAKE_GENERATOR MATCHES "Visual Studio|Xcode")
         # IDE generators pick the compiler and build tool themselves
-        list(APPEND package_consumer_forwarded CMAKE_CXX_COMPILER CMAKE_MAKE_PROGRAM)
+        list(APPEND package_consumer_forwarded_paths CMAKE_CXX_COMPILER CMAKE_MAKE_PROGRAM)
     endif()
-    foreach(var IN LISTS package_consumer_forwarded)
+    foreach(var IN LISTS package_consumer_forwarded_paths)
         if (DEFINED ${var} AND NOT "${${var}}" STREQUAL "")
-            string(APPEND package_consumer_cache "set(${var} \"${${var}}\" CACHE STRING \"\")\n")
+            package_consumer_cache_set_paths(${var} "${${var}}")
+        endif()
+    endforeach()
+    foreach(var IN ITEMS VCPKG_TARGET_TRIPLET CMAKE_OSX_ARCHITECTURES CMAKE_OSX_DEPLOYMENT_TARGET
+                         Boost_USE_STATIC_LIBS OPENSSL_USE_STATIC_LIBS OPENSSL_MSVC_STATIC_RT)
+        if (DEFINED ${var} AND NOT "${${var}}" STREQUAL "")
+            package_consumer_cache_set(${var} "${${var}}")
         endif()
     endforeach()
     if (MSVC AND LINK_STATICALLY)
-        string(APPEND package_consumer_cache
-            "set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded$<$<CONFIG:Debug>:Debug>\" CACHE STRING \"\")\n")
+        package_consumer_cache_set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
     file(WRITE ${package_consumer_dir}/initial_cache.cmake "${package_consumer_cache}")
 
