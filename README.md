@@ -24,6 +24,7 @@ A high-performance C++ HTTP/WebSocket client library built on Boost.Beast with f
 
 - **Boost** (1.75+): beast, asio, context components
 - **OpenSSL**: For SSL/TLS support
+- **slick-stream-buffer-multiplexer** (2.1.0+) and **slick-dynamic-buffer** (1.0.2+): buffer backends for `Websocket<>`. Fetched automatically with FetchContent when no installed package is found; the multiplexer brings in slick-stream-buffer 2.1.0+ and slick-queue 2.3.0+
 - **C++20 Compiler**: Required for coroutine support
   - GCC 14+ (GCC 13 has a known bug with coroutine lambdas in test code)
   - Clang 14+
@@ -105,7 +106,7 @@ include(FetchContent)
 FetchContent_Declare(
     slick-net
     GIT_REPOSITORY https://github.com/SlickQuant/slick-net.git
-    GIT_TAG v4.0.0
+    GIT_TAG v4.1.0
 )
 FetchContent_MakeAvailable(slick-net)
 target_link_libraries(your_target PRIVATE slick::net)
@@ -337,6 +338,23 @@ Run examples:
 ./examples/http_stream_client_example
 ./examples/http_awaitable_client_example
 ```
+
+## Run Tests
+
+Tests are built by default when slick-net is the top-level project (`BUILD_SLICK_NET_TESTS`):
+
+```bash
+cmake -B build
+cmake --build build
+ctest --test-dir build --output-on-failure   # add -C <config> for multi-config generators
+```
+
+Besides the unit tests, `package_consumer` checks the *installed* package: it installs the build
+tree to a scratch prefix inside the build directory, then configures, builds and runs
+[`tests/package_consumer`](tests/package_consumer) against it with nothing but
+`find_package(slick-net)`. It compiles a second project, so it takes a minute or two and needs the
+compiler environment — with Ninja and MSVC, run `ctest` from a Developer Command Prompt. Skip it
+with `ctest -E package_consumer`; it is not registered when `ENABLE_ASAN` is on.
 
 ## Benchmarks
 

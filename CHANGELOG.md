@@ -1,3 +1,19 @@
+# [v4.1.0] - 2026-10-10
+
+Tracks the slick-stream-buffer-multiplexer v2.1.0 release. No code in this library changed; the behaviour change below arrives through the raised dependency floor.
+
+## Changed
+- **Dependency bump**: `slick-stream-buffer-multiplexer` 2.1.0 is now required (was 2.0.0), in the build's `find_package()` / `FetchContent` pin and in the installed config's `find_dependency()` call. It in turn requires `slick-stream-buffer` 2.1.0 and `slick-queue` 2.3.0.
+- **Behaviour change (POSIX), inherited from those releases:** a shared-memory segment is no longer unlinked on destruction, not even by the instance that created it. This only concerns a `Websocket<>` whose backend is a *named* shared-memory `slick::stream_buffer` or `slick::stream_buffer_multiplexer`: its segments now stay in `/dev/shm` after exit and the next run attaches to them instead of starting fresh. Call `remove(name)` at startup to start clean, or at shutdown once no peer will attach again. Local-memory backends — the default `flat_buffer` and the unnamed buffers in the README and examples — and Windows are unaffected, and the shared-memory formats did not change.
+- Each dependency floor is defined once in `CMakeLists.txt` (`SLICK_NET_STREAM_BUFFER_MULTIPLEXER_MIN_VERSION`, `SLICK_NET_DYNAMIC_BUFFER_MIN_VERSION`) and used by `find_package()`, the `FetchContent` tag and — through `cmake/slick-net-config.cmake.in` — the installed package's `find_dependency()`, so the build and the installed package can no longer require different versions.
+- The examples build against `slick-logger` 2.2.1 (was 1.1.1).
+
+## Tests
+- `package_consumer` — the first test of the *installed* package. It installs the build tree to a scratch prefix inside the build directory, then configures, builds and runs the stand-alone project in `tests/package_consumer` against it with nothing but `find_package(slick-net)`: the config file, the exported `slick::net` target and its transitive dependencies, and a `Websocket<>` over each slick backend, with no network access. It also fails if the installed config asks for a different dependency floor than the build used. Runs as part of `ctest` with single- and multi-config generators, whether the slick dependencies were found or fetched; not registered when `ENABLE_ASAN` is on.
+
+## Documentation
+- README: the [Dependencies](README.md#dependencies) list names the slick libraries and their minimum versions, and a new [Run Tests](README.md#run-tests) section covers `ctest` and the `package_consumer` test.
+
 # [v4.0.0] - 2026-09-19
 
 ## Security

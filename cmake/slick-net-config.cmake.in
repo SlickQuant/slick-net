@@ -5,8 +5,8 @@ include(CMakeFindDependencyMacro)
 # Find required dependencies
 find_dependency(Boost CONFIG COMPONENTS beast context)
 find_dependency(OpenSSL CONFIG)
-find_dependency(slick-stream-buffer-multiplexer 2.0.0 CONFIG)
-find_dependency(slick-dynamic-buffer 1.0.2 CONFIG)
+find_dependency(slick-stream-buffer-multiplexer @SLICK_NET_STREAM_BUFFER_MULTIPLEXER_MIN_VERSION@ CONFIG)
+find_dependency(slick-dynamic-buffer @SLICK_NET_DYNAMIC_BUFFER_MIN_VERSION@ CONFIG)
 
 # Include the targets file
 include("${CMAKE_CURRENT_LIST_DIR}/slick-net-targets.cmake")

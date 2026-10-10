@@ -102,3 +102,78 @@ set_target_properties(slick_buffer_tests PROPERTIES
 set_target_properties(write_chain_gate_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
 )
+
+# ── installed-package consumer ───────────────────────────────────────────────
+# Installs this build tree to a scratch prefix, then configures, builds and runs
+# tests/package_consumer against it with nothing but find_package(slick-net). Nothing else
+# exercises the installed package: its config file, export set and dependency floors.
+# ASan builds are skipped - the consumer would have to repeat the sanitizer flags.
+if (NOT ENABLE_ASAN)
+    set(package_consumer_dir ${CMAKE_BINARY_DIR}/package_consumer)
+    set(package_consumer_prefix ${package_consumer_dir}/prefix)
+
+    # The consumer's initial cache: the toolchain this build used, slick-net pinned to the
+    # scratch prefix, and that prefix on the search path - dependencies this build fetched are
+    # installed into it too, and are found there when no installed package provides them.
+    string(CONCAT package_consumer_cache
+        "set(slick-net_DIR \"${package_consumer_prefix}/share/slick-net\" CACHE PATH \"\")\n"
+        "set(CMAKE_PREFIX_PATH \"${package_consumer_prefix};$CACHE{CMAKE_PREFIX_PATH}\" CACHE STRING \"\")\n"
+        "set(SLICK_NET_EXPECTED_VERSION \"${PROJECT_VERSION}\" CACHE STRING \"\")\n"
+        "set(SLICK_NET_EXPECTED_slick-stream-buffer-multiplexer_VERSION \"${SLICK_NET_STREAM_BUFFER_MULTIPLEXER_MIN_VERSION}\" CACHE STRING \"\")\n"
+        "set(SLICK_NET_EXPECTED_slick-dynamic-buffer_VERSION \"${SLICK_NET_DYNAMIC_BUFFER_MIN_VERSION}\" CACHE STRING \"\")\n"
+    )
+    set(package_consumer_forwarded CMAKE_TOOLCHAIN_FILE VCPKG_TARGET_TRIPLET
+        CMAKE_OSX_ARCHITECTURES CMAKE_OSX_DEPLOYMENT_TARGET CMAKE_OSX_SYSROOT
+        Boost_USE_STATIC_LIBS OPENSSL_USE_STATIC_LIBS OPENSSL_MSVC_STATIC_RT)
+    if (NOT CMAKE_GENERATOR MATCHES "Visual Studio|Xcode")
+        # IDE generators pick the compiler and build tool themselves
+        list(APPEND package_consumer_forwarded CMAKE_CXX_COMPILER CMAKE_MAKE_PROGRAM)
+    endif()
+    foreach(var IN LISTS package_consumer_forwarded)
+        if (DEFINED ${var} AND NOT "${${var}}" STREQUAL "")
+            string(APPEND package_consumer_cache "set(${var} \"${${var}}\" CACHE STRING \"\")\n")
+        endif()
+    endforeach()
+    if (MSVC AND LINK_STATICALLY)
+        string(APPEND package_consumer_cache
+            "set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded$<$<CONFIG:Debug>:Debug>\" CACHE STRING \"\")\n")
+    endif()
+    file(WRITE ${package_consumer_dir}/initial_cache.cmake "${package_consumer_cache}")
+
+    # Only the configuration under test gets installed, so that is the only one the consumer
+    # may generate: an imported slick::net has no library for the others.
+    get_property(package_consumer_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if (package_consumer_multi_config)
+        set(package_consumer_config -DCMAKE_CONFIGURATION_TYPES=$<CONFIG>)
+    else()
+        set(package_consumer_config -DCMAKE_BUILD_TYPE=$<CONFIG>)
+    endif()
+
+    set(package_consumer_generator --build-generator ${CMAKE_GENERATOR})
+    if (CMAKE_GENERATOR_PLATFORM)
+        list(APPEND package_consumer_generator --build-generator-platform ${CMAKE_GENERATOR_PLATFORM})
+    endif()
+    if (CMAKE_GENERATOR_TOOLSET)
+        list(APPEND package_consumer_generator --build-generator-toolset ${CMAKE_GENERATOR_TOOLSET})
+    endif()
+
+    # A prefix left by an earlier run could satisfy the consumer with a file this build no
+    # longer installs
+    add_test(NAME package_consumer_clean
+        COMMAND ${CMAKE_COMMAND} -E rm -rf ${package_consumer_prefix})
+    add_test(NAME package_consumer_install
+        COMMAND ${CMAKE_COMMAND} --install ${CMAKE_BINARY_DIR} --config $<CONFIG> --prefix ${package_consumer_prefix})
+    add_test(NAME package_consumer
+        COMMAND ${CMAKE_CTEST_COMMAND}
+            --build-and-test ${CMAKE_CURRENT_SOURCE_DIR}/package_consumer ${package_consumer_dir}/build
+            ${package_consumer_generator}
+            --build-config $<CONFIG>
+            --build-options -C ${package_consumer_dir}/initial_cache.cmake ${package_consumer_config}
+            --test-command ${CMAKE_CTEST_COMMAND} -C $<CONFIG> --output-on-failure)
+
+    set_tests_properties(package_consumer_clean PROPERTIES FIXTURES_SETUP package_consumer_prefix)
+    set_tests_properties(package_consumer_install PROPERTIES
+        FIXTURES_SETUP package_consumer_prefix DEPENDS package_consumer_clean TIMEOUT 300)
+    # Configures and compiles a Boost.Beast translation unit from scratch
+    set_tests_properties(package_consumer PROPERTIES FIXTURES_REQUIRED package_consumer_prefix TIMEOUT 900)
+endif()

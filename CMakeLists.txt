@@ -17,7 +17,7 @@ if (LINK_STATICALLY)
 endif()
 
 project(slick-net
-    VERSION 4.0.0
+    VERSION 4.1.0
     LANGUAGES CXX
 )
 
@@ -43,7 +43,13 @@ endif()
 find_package(Boost CONFIG REQUIRED COMPONENTS beast context)
 find_package(OpenSSL CONFIG REQUIRED)
 
-find_package(slick-stream-buffer-multiplexer 2.0.0 CONFIG QUIET)
+# Minimum dependency versions. Each is used by find_package(), the FetchContent tag and - through
+# cmake/slick-net-config.cmake.in - the installed package's find_dependency(), so the three
+# cannot drift apart.
+set(SLICK_NET_STREAM_BUFFER_MULTIPLEXER_MIN_VERSION 2.1.0)
+set(SLICK_NET_DYNAMIC_BUFFER_MIN_VERSION 1.0.2)
+
+find_package(slick-stream-buffer-multiplexer ${SLICK_NET_STREAM_BUFFER_MULTIPLEXER_MIN_VERSION} CONFIG QUIET)
 if (NOT slick-stream-buffer-multiplexer_FOUND)
     message(STATUS "Fetching slick-stream-buffer-multiplexer...")
     include(FetchContent)
@@ -51,7 +57,7 @@ if (NOT slick-stream-buffer-multiplexer_FOUND)
     FetchContent_Declare(
         slick-stream-buffer-multiplexer
         GIT_REPOSITORY https://github.com/SlickQuant/slick-stream-buffer-multiplexer.git
-        GIT_TAG v2.0.0
+        GIT_TAG v${SLICK_NET_STREAM_BUFFER_MULTIPLEXER_MIN_VERSION}
     )
     FetchContent_MakeAvailable(slick-stream-buffer-multiplexer)
 else()
@@ -75,7 +81,7 @@ if (slick-stream-buffer_FOUND)
     message(STATUS "Found slick-stream-buffer ${slick-stream-buffer_VERSION}: ${slick-stream-buffer_DIR}")
 endif()
 
-find_package(slick-dynamic-buffer 1.0.2 CONFIG QUIET)
+find_package(slick-dynamic-buffer ${SLICK_NET_DYNAMIC_BUFFER_MIN_VERSION} CONFIG QUIET)
 if (NOT slick-dynamic-buffer_FOUND)
     message(STATUS "Fetching slick-dynamic-buffer...")
     include(FetchContent)
@@ -83,7 +89,7 @@ if (NOT slick-dynamic-buffer_FOUND)
     FetchContent_Declare(
         slick-dynamic-buffer
         GIT_REPOSITORY https://github.com/SlickQuant/slick-dynamic-buffer.git
-        GIT_TAG v1.0.2
+        GIT_TAG v${SLICK_NET_DYNAMIC_BUFFER_MIN_VERSION}
     )
     FetchContent_MakeAvailable(slick-dynamic-buffer)
 else()
