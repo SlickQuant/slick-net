@@ -1,3 +1,11 @@
+# [v4.1.1] - 2026-10-14
+
+Tracks the slick-stream-buffer-multiplexer v2.2.0 release. No code in this library changed, and no behaviour changes for existing `Websocket<>` backends.
+
+## Changed
+- **Dependency bump**: `slick-stream-buffer-multiplexer` 2.2.0 is now required (was 2.1.0), in the build's `find_package()` / `FetchContent` pin and in the installed config's `find_dependency()` call. Its own floors are unchanged: `slick-stream-buffer` 2.1.0 and `slick-queue` 2.3.0.
+- Inherited from that release: the multiplexer can also take `slick::queue<uint8_t>` byte-queue producers (`add_queue_producer()` / `producer_queue`), merged into the same ordered stream as `stream_buffer` producers. Record and shared-memory formats are unchanged, and a producer registration that throws no longer leaves a half-registered producer behind.
+
 # [v4.1.0] - 2026-10-10
 
 Tracks the slick-stream-buffer-multiplexer v2.1.0 release. No code in this library changed; the behaviour change below arrives through the raised dependency floor.

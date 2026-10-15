@@ -24,7 +24,7 @@ A high-performance C++ HTTP/WebSocket client library built on Boost.Beast with f
 
 - **Boost** (1.75+): beast, asio, context components
 - **OpenSSL**: For SSL/TLS support
-- **slick-stream-buffer-multiplexer** (2.1.0+) and **slick-dynamic-buffer** (1.0.2+): buffer backends for `Websocket<>`. Fetched automatically with FetchContent when no installed package is found; the multiplexer brings in slick-stream-buffer 2.1.0+ and slick-queue 2.3.0+
+- **slick-stream-buffer-multiplexer** (2.2.0+) and **slick-dynamic-buffer** (1.0.2+): buffer backends for `Websocket<>`. Fetched automatically with FetchContent when no installed package is found; the multiplexer brings in slick-stream-buffer 2.1.0+ and slick-queue 2.3.0+
 - **C++20 Compiler**: Required for coroutine support
   - GCC 14+ (GCC 13 has a known bug with coroutine lambdas in test code)
   - Clang 14+
@@ -106,7 +106,7 @@ include(FetchContent)
 FetchContent_Declare(
     slick-net
     GIT_REPOSITORY https://github.com/SlickQuant/slick-net.git
-    GIT_TAG v4.1.0
+    GIT_TAG v4.1.1
 )
 FetchContent_MakeAvailable(slick-net)
 target_link_libraries(your_target PRIVATE slick::net)
